@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/esmakov/bittorrent-client/tokenizer"
+	"github.com/esmakov/bittorrent-client/parser"
 )
 
 func die(e error) {
@@ -26,5 +26,5 @@ func main() {
     // scan := bufio.NewScanner(strings.NewReader("d3:keyli1e3:stre10:anotherkeyd3:keyli3ei4ee3:key3:valeeld3:keyli1eed3:key3:val3:keyi2eeee4:test"))
 	// scan := bufio.NewScanner(strings.NewReader("ld3:keyi1234eed3:key3:valee"))
 
-	tokenizer.Parse(*scan)
+	parser.Main(*scan)
 }
