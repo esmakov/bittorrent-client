@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
-
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
@@ -22,9 +20,39 @@ func main() {
 	die(err)
 	defer fh.Close()
 
-	scan := bufio.NewScanner(fh)
-    // scan := bufio.NewScanner(strings.NewReader("d3:keyli1e3:stre10:anotherkeyd3:keyli3ei4ee3:key3:valeeld3:keyli1eed3:key3:val3:keyi2eeee4:test"))
-	// scan := bufio.NewScanner(strings.NewReader("ld3:keyi1234eed3:key3:valee"))
+    metaInfoMap := parser.ParseInfo(fh)
 
-	parser.Main(*scan)
+    trackerURL := metaInfoMap["announce"]
+    suggestedTitle := metaInfoMap["title"]
+    urlList := metaInfoMap["url-list"]
+
+    // Fields common to single-file and multi-file torrents
+    infoDict := metaInfoMap["info"].(map[string]any)
+    pieceLength := infoDict["piece length"]
+    pieces := infoDict["pieces"]
+    isPrivate := infoDict["private"]
+    files := infoDict["files"]
+
+    var fileMode string
+    if files != nil {
+        fileMode = "multiple"
+    } else {
+        fileMode = "single"
+    }
+
+    fmt.Println(suggestedTitle, trackerURL, urlList)
+    fmt.Println(pieceLength)
+    fmt.Println(pieces)
+    fmt.Println(isPrivate)
+
+    if fileMode == "multiple" {
+        for _, v := range files.([]any) {
+            fileDict := v.(map[string]any)
+            length := fileDict["length"]
+            pathList := fileDict["path"]
+            // fmt.Println(strings.Join(pathList, "/"))
+            fmt.Println(pathList.([]any))
+            fmt.Println(length)
+        }
+    }
 }
