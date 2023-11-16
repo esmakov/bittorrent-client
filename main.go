@@ -1,11 +1,11 @@
 package main
 
 import (
-    "strings"
 	"fmt"
 	"github.com/esmakov/bittorrent-client/parser"
+	_ "net/url"
 	"os"
-    _"net/url"
+	"strings"
 )
 
 func die(e error) {
@@ -18,11 +18,11 @@ func main() {
 	if len(os.Args) != 2 {
 		die(fmt.Errorf("USAGE: bittorrent-client [*.torrent]"))
 	}
-	fh, err := os.Open(os.Args[1])
+	fd, err := os.Open(os.Args[1])
 	die(err)
-	defer fh.Close()
+	defer fd.Close()
 
-	metaInfoMap := parser.ParseMetaInfo(fh)
+	metaInfoMap := parser.ParseMetaInfoFile(fd)
 
 	trackerURL := metaInfoMap["announce"]
 	suggestedTitle := metaInfoMap["title"]
@@ -32,8 +32,8 @@ func main() {
 	pieceLength := infoDict["piece length"]
 	pieces := infoDict["pieces"]
 	isPrivate := infoDict["private"]
-    _ = isPrivate
-    
+	_ = isPrivate
+
 	files := infoDict["files"]
 
 	var fileMode string
@@ -44,7 +44,7 @@ func main() {
 	}
 
 	fmt.Println(suggestedTitle)
-    fmt.Println(trackerURL)
+	fmt.Println(trackerURL)
 	fmt.Println(pieceLength)
 	fmt.Println(pieces)
 
@@ -55,12 +55,12 @@ func main() {
 			length := fileDict["length"]
 
 			pl := fileDict["path"].([]any)
-            pathList := make([]string, len(pl))
-            for i, v := range pl {
-                pathList[i] = v.(string)
-            }
+			pathList := make([]string, len(pl))
+			for i, v := range pl {
+				pathList[i] = v.(string)
+			}
 			fmt.Println(strings.Join(pathList, "/"), length, "bytes")
 		}
-        // fmt.Println(url.PathEscape())
+		// fmt.Println(url.PathEscape())
 	}
 }
