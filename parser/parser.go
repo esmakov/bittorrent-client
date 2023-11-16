@@ -4,47 +4,46 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
-    "os"
 )
 
 type btTokenType int
 
 const (
-	btNum       btTokenType = iota
+	btNum btTokenType = iota
 	btStr
-	btListStart             
-	btListEnd              
-	btDictStart           
-	btDictKey            
-	btDictEnd           
+	btListStart
+	btListEnd
+	btDictStart
+	btDictKey
+	btDictEnd
 )
 
-func (t btTokenType)String() string {
-    switch t {
-    case btNum:
-        return "btNum"
-    case btStr:
-        return "btStr"
-    case btListStart:
-        return "btListStart"
-    case btListEnd:
-        return "btListEnd"
-    case btDictStart:
-        return "btDictStart"
-    case btDictKey:
-        return "btDictKey"
-    case btDictEnd:
-        return "btDictEnd"
-    }
-    return "unknown"
+func (t btTokenType) String() string {
+	switch t {
+	case btNum:
+		return "btNum"
+	case btStr:
+		return "btStr"
+	case btListStart:
+		return "btListStart"
+	case btListEnd:
+		return "btListEnd"
+	case btDictStart:
+		return "btDictStart"
+	case btDictKey:
+		return "btDictKey"
+	case btDictEnd:
+		return "btDictEnd"
+	}
+	return "unknown"
 }
 
 type btToken struct {
 	tokenType   btTokenType
 	lexeme      string
 	literal     any
-	indentLevel int
 }
 
 func die(e error) {
@@ -93,133 +92,169 @@ func newStack[T any]() stack[T] {
 
 var tokenList = []btToken{}
 
+func bencode() string {
+
+    return ""
+}
+
 /*
 Assumes that the provided scanner is for a correctly-formatted .torrent metainfo file.
 */
-func ParseInfo(fh *os.File) map[string]any {
+func ParseMetaInfo(fh *os.File) map[string]any {
 	fmt.Println("--------------------------------")
-    scan := bufio.NewScanner(fh)
+	scan := bufio.NewScanner(fh)
 	scan.Split(splitFunc)
 
-    // Build up the list
-	for scan.Scan() {}
-
-	for _, v := range tokenList {
-		for i := v.indentLevel; i > 0; i-- {
-			fmt.Print("\t")
-		}
-		// fmt.Println(v.tokenType, v.lexeme)
+	// Build up the list
+	for scan.Scan() {
+        // fmt.Println(scan.Text())
 	}
 
-    // Shrink it down again
-    _, err := consume()
-    die(err)
 
-    return parseDict()
+	// Shrink it down again
+	_, err := consume()
+	die(err)
+
+	return parseDict()
 }
 
 func parse(t btToken) any {
-    switch v := t.literal.(type){
-    case string:
-        fmt.Println("string", v)
-        return v
-    case int:
-        fmt.Println("int", v)
-        return v
-    default:
-        fmt.Println("no match:", t.lexeme)
-    }
-        switch t.tokenType {
-        // case "btNum":
-        //     fallthrough
-        // case "btStr":
-        //     return t.literal
-        case btDictStart:
-            return parseDict()
-        case btListStart:
-            return parseList()
-        default:
-            return nil
-        }
+	switch v := t.literal.(type) {
+	case string:
+		// fmt.Println("string", v)
+		return v
+	case int:
+		// fmt.Println("int", v)
+		return v
+	default:
+		// fmt.Println("no match:", t.lexeme)
+	}
+
+	switch t.tokenType {
+	// case "btNum":
+	//     fallthrough
+	// case "btStr":
+	//     return t.literal
+	case btDictStart:
+		return parseDict()
+	case btListStart:
+		return parseList()
+	default:
+		return nil
+	}
 }
 
 func consume() (btToken, error) {
-    if len(tokenList) == 0 {
-        return *new(btToken), errors.New("End of list")
-    } 
-    t := tokenList[0]
-    tokenList = tokenList[1:]
-    return t, nil
+	if len(tokenList) == 0 {
+		return *new(btToken), errors.New("End of list")
+	}
+	t := tokenList[0]
+	tokenList = tokenList[1:]
+	return t, nil
 }
 
 func parseList() []any {
-    s := make([]any, 0)
-    for {
-        t, err := consume()
-        if err != nil || t.tokenType == btListEnd {
-            break
-        }
-        s = append(s, parse(t))
-    }
-    return s
+	s := make([]any, 0)
+	for {
+		t, err := consume()
+		if err != nil || t.tokenType == btListEnd {
+			break
+		}
+		s = append(s, parse(t))
+	}
+	return s
 }
 
-func parseDict() (map[string]any) {
-    m := make(map[string]any)
-    for {
-        k, v, err := parseEntry()
-        if err != nil {
-            break
-        }
-        m[k] = v
-    }
-    return m
+func parseDict() map[string]any {
+	m := make(map[string]any)
+	for {
+		k, v, err := parseEntry()
+		if err != nil {
+			break
+		}
+		m[k] = v
+	}
+	return m
 }
 
 func parseEntry() (k string, v any, e error) {
-    for i := 0; i <= 1; i++ {
-        t, err := consume()
-        if err != nil {
-            e = err
-            return
-        }
-        if t.tokenType == btDictEnd {
-            e = errors.New("End of dict")
-            return
-        }
+	for i := 0; i <= 1; i++ {
+		t, err := consume()
+		if err != nil {
+			e = err
+			return
+		}
+		if t.tokenType == btDictEnd {
+			e = errors.New("End of dict")
+			return
+		}
 
-        if t.tokenType == btDictKey {
-            k = t.lexeme
-        } else {
-            // Value can be of any bencoded type
-            v = parse(t)
-        }
-    }
-    return
+		if t.tokenType == btDictKey {
+			k = t.lexeme
+		} else {
+			// Value can be of any bencoded type
+			v = parse(t)
+		}
+	}
+	return
 }
 
 var (
-	indentLevel              = 0
-	shouldExpectDictKey      = false
+	indentLevel           = 0
+	shouldExpectDictKey   = false
 	unclosedCompoundTypes = newStack[btToken]()
 )
+func prettyPrint(t btToken) {
+		for i := indentLevel; i > 0; i-- {
+		    fmt.Print("\t")
+		}
+		fmt.Println(t.tokenType, t.lexeme)
+}
 
 func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	for i := 0; i < len(data); i++ {
 		switch c := data[i]; c {
 		case 'l':
-			t := btToken{btListStart, "l", nil, indentLevel}
+			t := btToken{btListStart, "l", nil}
 			unclosedCompoundTypes.Push(t)
 			tokenList = append(tokenList, t)
 			indentLevel++
+            prettyPrint(t)
 			return 1, data[:i], nil
 		case 'd':
-			t := btToken{btDictStart, "d", nil, indentLevel}
+			t := btToken{btDictStart, "d", nil}
 			unclosedCompoundTypes.Push(t)
 			tokenList = append(tokenList, t)
 			indentLevel++
 			shouldExpectDictKey = true
+            prettyPrint(t)
 			return 1, data[:i], nil
+        case 'e':
+            indentLevel--
+
+            switch unclosedCompoundTypes.Pop().tokenType {
+            case btListStart:
+                if unclosedCompoundTypes.Peek().tokenType == btDictStart {
+                    // This list was a value in a dict
+                    shouldExpectDictKey = true
+                }
+
+                t := btToken{btListEnd, "e", nil}
+                tokenList = append(tokenList, t)
+                prettyPrint(t)
+                return 1, data[:i], nil
+            case btDictStart:
+                if unclosedCompoundTypes.Peek().tokenType == btDictStart {
+                    shouldExpectDictKey = true
+                }
+
+                t := btToken{btDictEnd, "e", nil}
+                tokenList = append(tokenList, t)
+                prettyPrint(t)
+                return 1, data[:i], nil
+            default:
+                die(fmt.Errorf("Unrecognized token type\n"))
+            }
 		case 'i':
 			curr := i + 1 // Consume i
 			tokenStartIdx := curr
@@ -237,33 +272,10 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 				shouldExpectDictKey = true
 			}
 
-			t := btToken{btNum, lexeme, numVal, indentLevel}
+			t := btToken{btNum, lexeme, numVal}
 			tokenList = append(tokenList, t)
+            prettyPrint(t)
 			return curr + 1, token, nil
-		case 'e':
-			indentLevel--
-
-			switch unclosedCompoundTypes.Pop().tokenType {
-			case btListStart:
-				if unclosedCompoundTypes.Peek().tokenType == btDictStart {
-					// This list was a value in a dict
-					shouldExpectDictKey = true
-				}
-
-				t := btToken{btListEnd, "e", nil, indentLevel}
-				tokenList = append(tokenList, t)
-				return 1, data[:i], nil
-			case btDictStart:
-				if unclosedCompoundTypes.Peek().tokenType == btDictStart {
-					shouldExpectDictKey = true
-				}
-
-				t := btToken{btDictEnd, "e", nil, indentLevel}
-				tokenList = append(tokenList, t)
-				return 1, data[:i], nil
-			default:
-				die(fmt.Errorf("Unrecognized token type\n"))
-			}
 		default:
 			if c >= '0' && c <= '9' {
 				curr := i
@@ -278,27 +290,22 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 
 				token := data[tokenStartIdx:tokenEndIdx]
 				lexeme := string(token)
-				var t btToken
+
+				// Assume not in a dict
+                t := btToken{btStr, lexeme, lexeme}
 
 				if unclosedCompoundTypes.Peek().tokenType == btDictStart {
 					if shouldExpectDictKey {
-						t = btToken{btDictKey, lexeme, lexeme, indentLevel}
+                        t.tokenType = btDictKey
 						shouldExpectDictKey = false
 					} else {
 						// This string is a dict value
-						t = btToken{btStr, lexeme, lexeme, indentLevel}
 						shouldExpectDictKey = true
 					}
-				} else {
-					// Not in a dict
-					t = btToken{btStr, lexeme, lexeme, indentLevel}
 				}
 
-                if t == *new(btToken) {
-				    die(fmt.Errorf("Unrecognized token type\n"))
-                }
-
 				tokenList = append(tokenList, t)
+                prettyPrint(t)
 				return tokenEndIdx - i, token, nil
 			} else {
 				die(fmt.Errorf("Unrecognized token type\n"))

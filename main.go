@@ -1,9 +1,11 @@
 package main
 
 import (
+    "strings"
 	"fmt"
-	"os"
 	"github.com/esmakov/bittorrent-client/parser"
+	"os"
+    _"net/url"
 )
 
 func die(e error) {
@@ -20,39 +22,45 @@ func main() {
 	die(err)
 	defer fh.Close()
 
-    metaInfoMap := parser.ParseInfo(fh)
+	metaInfoMap := parser.ParseMetaInfo(fh)
 
-    trackerURL := metaInfoMap["announce"]
-    suggestedTitle := metaInfoMap["title"]
-    urlList := metaInfoMap["url-list"]
+	trackerURL := metaInfoMap["announce"]
+	suggestedTitle := metaInfoMap["title"]
 
-    // Fields common to single-file and multi-file torrents
-    infoDict := metaInfoMap["info"].(map[string]any)
-    pieceLength := infoDict["piece length"]
-    pieces := infoDict["pieces"]
-    isPrivate := infoDict["private"]
-    files := infoDict["files"]
+	// Fields common to single-file and multi-file torrents
+	infoDict := metaInfoMap["info"].(map[string]any)
+	pieceLength := infoDict["piece length"]
+	pieces := infoDict["pieces"]
+	isPrivate := infoDict["private"]
+    _ = isPrivate
+    
+	files := infoDict["files"]
 
-    var fileMode string
-    if files != nil {
-        fileMode = "multiple"
-    } else {
-        fileMode = "single"
-    }
+	var fileMode string
+	if files != nil {
+		fileMode = "multiple"
+	} else {
+		fileMode = "single"
+	}
 
-    fmt.Println(suggestedTitle, trackerURL, urlList)
-    fmt.Println(pieceLength)
-    fmt.Println(pieces)
-    fmt.Println(isPrivate)
+	fmt.Println(suggestedTitle)
+    fmt.Println(trackerURL)
+	fmt.Println(pieceLength)
+	fmt.Println(pieces)
 
-    if fileMode == "multiple" {
-        for _, v := range files.([]any) {
-            fileDict := v.(map[string]any)
-            length := fileDict["length"]
-            pathList := fileDict["path"]
-            // fmt.Println(strings.Join(pathList, "/"))
-            fmt.Println(pathList.([]any))
-            fmt.Println(length)
-        }
-    }
+	if fileMode == "multiple" {
+		for _, v := range files.([]any) {
+			fileDict := v.(map[string]any)
+
+			length := fileDict["length"]
+
+			pl := fileDict["path"].([]any)
+            pathList := make([]string, len(pl))
+            for i, v := range pl {
+                pathList[i] = v.(string)
+            }
+			fmt.Println(strings.Join(pathList, "/"), length, "bytes")
+		}
+        // fmt.Println(url.PathEscape())
+	}
 }
