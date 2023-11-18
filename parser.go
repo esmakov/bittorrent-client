@@ -1,12 +1,15 @@
-package parser
+package main
 
 import (
 	"bufio"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type btTokenType int
@@ -47,86 +50,46 @@ type btToken struct {
 	literal   any
 }
 
-func die(e error) {
-	if e != nil {
-		panic(e)
-	}
-}
-
-// Credit: Michael Green
-// https://stackoverflow.com/questions/28541609/looking-for-reasonable-stack-implementation-in-golang
-type stack[T any] struct {
-	Push   func(T)
-	Pop    func() T
-	Peek   func() T
-	Length func() int
-}
-
-func newStack[T any]() stack[T] {
-	slice := make([]T, 0)
-	return stack[T]{
-		Push: func(i T) {
-			slice = append(slice, i)
-		},
-		Pop: func() T {
-			if len(slice) == 0 {
-				return *new(T)
-			}
-			res := slice[len(slice)-1]
-			slice = slice[:len(slice)-1]
-			return res
-		},
-		Peek: func() T {
-			if len(slice) == 0 {
-				return *new(T)
-			}
-
-			res := slice[len(slice)-1]
-			return res
-
-		},
-		Length: func() int {
-			return len(slice)
-		},
-	}
-}
-
 var tokenList = []btToken{}
 
-func bencode() string {
-	return ""
-}
-
 /*
-Assumes that the provided scanner is for a correctly-formatted .torrent metainfo file.
+Assumes that the provided file is a correctly-formatted metainfo file.
 */
-func ParseMetaInfoFile(fd *os.File) map[string]any {
-	// Build up the list
-	decode(fd)
+func ParseMetaInfoFile(file string) map[string]any {
+	fd, err := os.Open(file)
+	die(err)
+	defer fd.Close()
+
+	// Build up the token list and populate indices around "info" dictionary
+	bdecode(fd)
+
+    fileBytes, _ := os.ReadFile(file)
+    infoDictBytes := fileBytes[infoDictStartIdx:infoDictEndIdx + 1]
+    infoHash := Hash(bufio.NewReader(strings.NewReader(string(infoDictBytes))))
+    escapedInfoHash := url.PathEscape(infoHash)
+    fmt.Println("info_hash:", escapedInfoHash)
 
 	// Shrink it down again
-	_, err := consume()
-	die(err)
+	if _, err := consume(); err != nil {
+        log.Fatalln(err)
+    }
 
 	return parseDict()
 }
 
-func decode(r io.Reader) {
+func bdecode(r io.Reader) {
 	fmt.Println("--------------------------------")
 	scan := bufio.NewScanner(r)
 	scan.Split(splitFunc)
 
-	for scan.Scan() {
-	}
+	for scan.Scan() {}
 }
 
 func parse(t btToken) any {
 	switch v := t.literal.(type) {
 	case string:
-		// fmt.Println("string", v)
 		return v
 	case int:
-		// fmt.Println("int", v)
 		return v
 	default:
 		// fmt.Println("no match:", t.lexeme)
@@ -206,51 +169,55 @@ func parseEntry() (k string, v any, e error) {
 
 var (
 	idx                   = 0
+	infoDictStartIdx      = 0
+	infoDictEndIdx        = 0
 	indentLevel           = 0
 	shouldExpectDictKey   = false
 	unclosedCompoundTypes = newStack[btToken]()
 )
 
 func prettyPrint(t btToken) {
-	for i := indentLevel; i > 0; i-- {
-		fmt.Print("\t")
-	}
-	fmt.Println(t.tokenType, t.lexeme)
+	// for i := indentLevel; i > 0; i-- {
+	// 	fmt.Print("\t")
+	// }
+	// fmt.Println(t.tokenType, t.lexeme)
 }
 
 func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	for i := 0; i < len(data); i++ {
 		switch c := data[i]; c {
 		case 'l':
-			indentLevel++
-
 			t := btToken{btListStart, "l", nil}
-			unclosedCompoundTypes.Push(t)
+
 			tokenList = append(tokenList, t)
+			unclosedCompoundTypes.Push(t)
 			prettyPrint(t)
+			indentLevel++
 
 			advance = 1
 			idx += advance
 			token = data[:advance]
 			return
 		case 'd':
-			indentLevel++
 			shouldExpectDictKey = true
 
 			t := btToken{btDictStart, "d", nil}
-			tokenList = append(tokenList, t)
-			prettyPrint(t)
 
+			if idx == infoDictStartIdx && idx != 0 {
+				t.lexeme = "INFODICT"
+			}
+
+			tokenList = append(tokenList, t)
 			unclosedCompoundTypes.Push(t)
+			prettyPrint(t)
+			indentLevel++
 
 			advance = 1
 			idx += advance
 			token = data[:advance]
 			return
 		case 'e':
-			indentLevel--
-
-			switch unclosedCompoundTypes.Pop().tokenType {
+			switch next := unclosedCompoundTypes.Pop(); next.tokenType {
 			case btListStart:
 				if unclosedCompoundTypes.Peek().tokenType == btDictStart {
 					// This list was a value in a dict
@@ -259,6 +226,7 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 
 				t := btToken{btListEnd, "e", nil}
 				tokenList = append(tokenList, t)
+				indentLevel--
 				prettyPrint(t)
 
 				advance = 1
@@ -267,12 +235,19 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 				return
 			case btDictStart:
 				if unclosedCompoundTypes.Peek().tokenType == btDictStart {
+					// This dict was a value in an outer dict
 					shouldExpectDictKey = true
+				}
+
+				if next.lexeme == "INFODICT" {
+					infoDictEndIdx = idx
 				}
 
 				t := btToken{btDictEnd, "e", nil}
 				tokenList = append(tokenList, t)
+				indentLevel--
 				prettyPrint(t)
+
 				advance = 1
 				idx += advance
 				token = data[:advance]
@@ -323,6 +298,7 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 
 				tokenStartIdx := advance + 1
 				advance += strLen + 1
+				idx += advance
 
 				token = data[tokenStartIdx:advance]
 				lexeme := string(token)
@@ -334,6 +310,9 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 					if shouldExpectDictKey {
 						t.tokenType = btDictKey
 						shouldExpectDictKey = false
+						if t.lexeme == "info" {
+							infoDictStartIdx = idx
+						}
 					} else {
 						// This string is a dict value
 						shouldExpectDictKey = true
@@ -343,7 +322,6 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 				tokenList = append(tokenList, t)
 				prettyPrint(t)
 
-				idx += advance
 				return
 			} else {
 				err = errors.New("Unrecognized token type")
