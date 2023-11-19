@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/url"
 	"os"
 	"strconv"
-	"strings"
 )
 
 type btTokenType int
@@ -55,7 +53,7 @@ var tokenList = []btToken{}
 /*
 Assumes that the provided file is a correctly-formatted metainfo file.
 */
-func ParseMetaInfoFile(file string) map[string]any {
+func ParseMetaInfoFile(file string) (map[string]any, []byte) {
 	fd, err := os.Open(file)
 	die(err)
 	defer fd.Close()
@@ -63,26 +61,30 @@ func ParseMetaInfoFile(file string) map[string]any {
 	// Build up the token list and populate indices around "info" dictionary
 	bdecode(fd)
 
-    fileBytes, _ := os.ReadFile(file)
-    infoDictBytes := fileBytes[infoDictStartIdx:infoDictEndIdx + 1]
-    infoHash := Hash(bufio.NewReader(strings.NewReader(string(infoDictBytes))))
-    escapedInfoHash := url.PathEscape(infoHash)
-    fmt.Println("info_hash:", escapedInfoHash)
+	fileBytes, _ := os.ReadFile(file)
+	if infoDictEndIdx == 0 {
+		log.Fatalln("Didn't find info dict ending")
+	}
+	infoDictBytes := fileBytes[infoDictStartIdx : infoDictEndIdx+1]
+	infoHash := Hash(infoDictBytes)
 
 	// Shrink it down again
 	if _, err := consume(); err != nil {
-        log.Fatalln(err)
-    }
+		log.Fatalln(err)
+	}
 
-	return parseDict()
+	return parseDict(), infoHash
 }
 
 func bdecode(r io.Reader) {
 	fmt.Println("--------------------------------")
 	scan := bufio.NewScanner(r)
+	// TODO: Use smaller buffer
+	scan.Buffer(make([]byte, 0, 512*1024), 1024*1024)
 	scan.Split(splitFunc)
 
-	for scan.Scan() {}
+	for scan.Scan() {
+	}
 }
 
 func parse(t btToken) any {
@@ -286,6 +288,7 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 			idx += advance
 			return
 		default:
+			// bencoded string
 			if c >= '0' && c <= '9' {
 				for data[advance] != ':' {
 					advance++
