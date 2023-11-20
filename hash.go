@@ -3,11 +3,10 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
-	"fmt"
 	"io"
 )
 
-func Hash(b []byte) []byte {
+func HashSHA1(b []byte) []byte {
 	h := sha1.New()
 	rdr := bytes.NewReader(b)
 	if _, err := io.Copy(h, rdr); err != nil {
@@ -54,10 +53,7 @@ func CustomURLEscape(input []byte) string {
 		')':  true,
 		',':  true,
 	}
-	fmt.Printf("Input: % x\n", input)
 	for _, b := range input {
-		// fmt.Printf("% x\n", b)
-		// fmt.Printf("% d\n", b)
 		if b >= 0x20 && b <= 0x7E && !urlReserved[b] {
 			// For printable ASCII characters that are not reserved, append them as is
 			escaped = append(escaped, b)
@@ -66,6 +62,5 @@ func CustomURLEscape(input []byte) string {
 			escaped = append(escaped, '%', hexDigits[b>>4], hexDigits[b&0x0F])
 		}
 	}
-	fmt.Printf("Result: %c\n", escaped)
 	return string(escaped)
 }

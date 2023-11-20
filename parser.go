@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -58,7 +57,6 @@ func ParseMetaInfoFile(file string) (map[string]any, []byte) {
 	die(err)
 	defer fd.Close()
 
-	// Build up the token list and populate indices around "info" dictionary
 	bdecode(fd)
 
 	fileBytes, _ := os.ReadFile(file)
@@ -66,18 +64,19 @@ func ParseMetaInfoFile(file string) (map[string]any, []byte) {
 		log.Fatalln("Didn't find info dict ending")
 	}
 	infoDictBytes := fileBytes[infoDictStartIdx : infoDictEndIdx+1]
-	infoHash := Hash(infoDictBytes)
+	infoHash := HashSHA1(infoDictBytes)
 
-	// Shrink it down again
+	// Ignore start of dict
 	if _, err := consume(); err != nil {
 		log.Fatalln(err)
 	}
 
+	// Recursively parse the tokens in the list
 	return parseDict(), infoHash
 }
 
+// Build up the token list and populate indices around "info" dictionary
 func bdecode(r io.Reader) {
-	fmt.Println("--------------------------------")
 	scan := bufio.NewScanner(r)
 	// TODO: Use smaller buffer
 	scan.Buffer(make([]byte, 0, 512*1024), 1024*1024)
@@ -87,21 +86,23 @@ func bdecode(r io.Reader) {
 	}
 }
 
-func parse(t btToken) any {
-	switch v := t.literal.(type) {
-	case string:
-		return v
-	case int:
-		return v
-	default:
-		// fmt.Println("no match:", t.lexeme)
-	}
+func ParseResponse(r io.Reader) map[string]any {
+	bdecode(r)
 
+	// Ignore start of dict
+	if _, err := consume(); err != nil {
+		log.Fatalln(err)
+	}
+	return parseDict()
+}
+
+// Mutually recursive parser
+func parse(t btToken) any {
 	switch t.tokenType {
-	// case "btNum":
-	//     fallthrough
-	// case "btStr":
-	//     return t.literal
+	case btNum:
+		fallthrough
+	case btStr:
+		return t.literal
 	case btDictStart:
 		return parseDict()
 	case btListStart:
@@ -158,9 +159,6 @@ func parseEntry() (k string, v any, e error) {
 
 		if t.tokenType == btDictKey {
 			k = t.lexeme
-			if k == "info" {
-
-			}
 		} else {
 			// Value can be of any bencoded type
 			v = parse(t)

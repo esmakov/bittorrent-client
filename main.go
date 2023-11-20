@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -73,7 +76,6 @@ func main() {
 	}
 	printStatus()
 
-	port := findNextFreePort()
 	uploaded := "0"
 	downloaded := "0"
 	left := "0"
@@ -87,27 +89,35 @@ func main() {
 	queryParams.Set("uploaded", uploaded)
 	queryParams.Set("downloaded", downloaded)
 	queryParams.Set("left", left)
-	uri.RawQuery = "info_hash" + escapedInfoHash + "&" + queryParams.Encode()
-	// uri.RawQuery = queryParams.Encode()
-	fmt.Println(uri.String())
+	queryParams.Set("event", "started")
+	uri.RawQuery = "info_hash=" + escapedInfoHash + "&" + queryParams.Encode()
 
-	req, err := http.NewRequest("GET", "", nil)
+	startReq, err := http.NewRequest("GET", uri.String(), nil)
 	die(err)
-	return
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := client.Do(startReq)
 	die(err)
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	die(err)
-	fmt.Println(body)
 
-	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		fmt.Println(req)
-	})
-	http.ListenAndServe(":"+port, nil)
+	response := ParseResponse(bufio.NewReader(bytes.NewReader(body)))
+
+	// TODO: Handle dictionary model
+	peerBytes := response["peers"].(string)
+	peerList, err := extractCompactPeers(peerBytes)
+	die(err)
+	fmt.Println(response)
+	fmt.Println(peerList)
+
+	// myPort := findNextFreePort()
+
+	// http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+	// 	fmt.Println(req)
+	// })
+	// http.ListenAndServe(":"+port, nil)
 }
 
 func makePeerId() string {
@@ -115,4 +125,30 @@ func makePeerId() string {
 }
 func findNextFreePort() string {
 	return "6881"
+}
+func extractCompactPeers(s string) ([]string, error) {
+	list := make([]string, 0)
+
+	if len(s)%6 != 0 {
+		return nil, errors.New("Peer information must be a multiple of 6 bytes")
+	}
+
+	for i := 0; i < len(s); {
+		ip := ""
+		for j := 0; j < 4; j++ {
+			ip += fmt.Sprintf("%d", s[i])
+			if j != 3 {
+				ip += "."
+			}
+			i++
+		}
+		ip += ":"
+		for j := 0; j < 2; j++ {
+			ip += fmt.Sprintf("%d", s[i])
+			i++
+		}
+		list = append(list, ip)
+	}
+
+	return list, nil
 }
