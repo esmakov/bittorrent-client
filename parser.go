@@ -9,10 +9,11 @@ import (
 	"strconv"
 )
 
-type btTokenType int
+type btTokenKinds int
 
 const (
-	btNum btTokenType = iota
+	btZeroVal btTokenKinds = iota
+	btNum
 	btStr
 	btListStart
 	btListEnd
@@ -21,7 +22,7 @@ const (
 	btDictEnd
 )
 
-func (t btTokenType) String() string {
+func (t btTokenKinds) String() string {
 	switch t {
 	case btNum:
 		return "btNum"
@@ -38,105 +39,124 @@ func (t btTokenType) String() string {
 	case btDictEnd:
 		return "btDictEnd"
 	}
-	return "unknown"
+	return "btZeroVal"
 }
 
 type btToken struct {
-	tokenType btTokenType
+	tokenKind btTokenKinds
 	lexeme    string
 	literal   any
 }
 
-var tokenList = []btToken{}
+type parser struct {
+	tokenList             []btToken
+	fileIdx               int
+	infoDictStartIdx      int
+	infoDictEndIdx        int
+	indentLevel           int
+	shouldExpectDictKey   bool
+	unclosedCompoundTypes stack[btToken]
+	splitFun              bufio.SplitFunc
+}
+
+func newParser() *parser {
+	stack := newStack[btToken]()
+	return &parser{
+		unclosedCompoundTypes: stack,
+	}
+}
 
 /*
 Assumes that the provided file is a correctly-formatted metainfo file.
 */
-func ParseMetaInfoFile(file string) (map[string]any, []byte) {
+func (p *parser) ParseMetaInfoFile(file string) (map[string]any, []byte) {
 	fd, err := os.Open(file)
 	die(err)
 	defer fd.Close()
 
-	bdecode(fd)
+	p.bdecode(fd)
 
+	// Extract info hash verbatim
 	fileBytes, _ := os.ReadFile(file)
-	if infoDictEndIdx == 0 {
+	if p.infoDictEndIdx == 0 {
 		log.Fatalln("Didn't find info dict ending")
 	}
-	infoDictBytes := fileBytes[infoDictStartIdx : infoDictEndIdx+1]
+	infoDictBytes := fileBytes[p.infoDictStartIdx : p.infoDictEndIdx+1]
 	infoHash := HashSHA1(infoDictBytes)
 
 	// Ignore start of dict
-	if _, err := consume(); err != nil {
+	if _, err := p.consumeToken(); err != nil {
 		log.Fatalln(err)
 	}
 
 	// Recursively parse the tokens in the list
-	return parseDict(), infoHash
+	return p.parseDict(), infoHash
 }
 
-// Build up the token list and populate indices around "info" dictionary
-func bdecode(r io.Reader) {
+// While scanning, builds up the token list and populates indices around "info" dictionary
+func (p *parser) bdecode(r io.Reader) {
 	scan := bufio.NewScanner(r)
 	// TODO: Use smaller buffer
-	scan.Buffer(make([]byte, 0, 512*1024), 1024*1024)
-	scan.Split(splitFunc)
+	const START_BUFFER_SIZE = 512 * 1024
+	const MAX_BUFFER_SIZE = 1024 * 1024
+
+	scan.Buffer(make([]byte, START_BUFFER_SIZE), MAX_BUFFER_SIZE)
+	scan.Split(p.splitFunc)
 
 	for scan.Scan() {
 	}
 }
 
-func ParseResponse(r io.Reader) map[string]any {
-	bdecode(r)
+func (p *parser) ParseResponse(r io.Reader) map[string]any {
+	p.bdecode(r)
 
 	// Ignore start of dict
-	if _, err := consume(); err != nil {
+	if _, err := p.consumeToken(); err != nil {
 		log.Fatalln(err)
 	}
-	return parseDict()
+	return p.parseDict()
 }
 
-// Mutually recursive parser
-func parse(t btToken) any {
-	switch t.tokenType {
+func (p *parser) parse(t btToken) any {
+	switch t.tokenKind {
 	case btNum:
 		fallthrough
 	case btStr:
 		return t.literal
 	case btDictStart:
-		return parseDict()
+		return p.parseDict()
 	case btListStart:
-		return parseList()
+		return p.parseList()
 	default:
 		return nil
 	}
 }
 
-func consume() (btToken, error) {
-	if len(tokenList) == 0 {
+func (p *parser) consumeToken() (btToken, error) {
+	if len(p.tokenList) == 0 {
 		return *new(btToken), errors.New("End of list")
 	}
-	t := tokenList[0]
-	tokenList = tokenList[1:]
+	t := p.tokenList[0]
+	p.tokenList = p.tokenList[1:]
 	return t, nil
 }
 
-func parseList() []any {
+func (p *parser) parseList() []any {
 	s := make([]any, 0)
 	for {
-		t, err := consume()
-		if err != nil || t.tokenType == btListEnd {
+		t, err := p.consumeToken()
+		if err != nil || t.tokenKind == btListEnd {
 			break
 		}
-		s = append(s, parse(t))
+		s = append(s, p.parse(t))
 	}
 	return s
 }
 
-func parseDict() map[string]any {
+func (p *parser) parseDict() map[string]any {
 	m := make(map[string]any)
 	for {
-		k, v, err := parseEntry()
+		k, v, err := p.parseEntry()
 		if err != nil {
 			break
 		}
@@ -145,126 +165,118 @@ func parseDict() map[string]any {
 	return m
 }
 
-func parseEntry() (k string, v any, e error) {
+func (p *parser) parseEntry() (k string, v any, e error) {
 	for i := 0; i <= 1; i++ {
-		t, err := consume()
+		t, err := p.consumeToken()
 		if err != nil {
 			e = err
 			return
 		}
-		if t.tokenType == btDictEnd {
+		if t.tokenKind == btDictEnd {
 			e = errors.New("End of dict")
 			return
 		}
 
-		if t.tokenType == btDictKey {
+		if t.tokenKind == btDictKey {
 			k = t.lexeme
 		} else {
 			// Value can be of any bencoded type
-			v = parse(t)
+			v = p.parse(t)
 		}
 	}
 	return
 }
 
-var (
-	idx                   = 0
-	infoDictStartIdx      = 0
-	infoDictEndIdx        = 0
-	indentLevel           = 0
-	shouldExpectDictKey   = false
-	unclosedCompoundTypes = newStack[btToken]()
-)
-
-func prettyPrint(t btToken) {
+func (p *parser) prettyPrint(t btToken) {
+	// TODO: Enable with command line arg
 	// for i := indentLevel; i > 0; i-- {
 	// 	fmt.Print("\t")
 	// }
 	// fmt.Println(t.tokenType, t.lexeme)
 }
 
-func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
+func (p *parser) splitFunc(data []byte, atEOF bool) (bytesToAdvance int, token []byte, err error) {
 	for i := 0; i < len(data); i++ {
 		switch c := data[i]; c {
 		case 'l':
 			t := btToken{btListStart, "l", nil}
 
-			tokenList = append(tokenList, t)
-			unclosedCompoundTypes.Push(t)
-			prettyPrint(t)
-			indentLevel++
+			p.tokenList = append(p.tokenList, t)
+			p.unclosedCompoundTypes.Push(t)
+			p.prettyPrint(t)
+			p.indentLevel++
 
-			advance = 1
-			idx += advance
-			token = data[:advance]
+			bytesToAdvance = 1
+			p.fileIdx += bytesToAdvance
+			token = data[:bytesToAdvance]
 			return
 		case 'd':
-			shouldExpectDictKey = true
+			p.shouldExpectDictKey = true
 
 			t := btToken{btDictStart, "d", nil}
 
-			if idx == infoDictStartIdx && idx != 0 {
+			if p.fileIdx == p.infoDictStartIdx && p.fileIdx != 0 {
 				t.lexeme = "INFODICT"
 			}
 
-			tokenList = append(tokenList, t)
-			unclosedCompoundTypes.Push(t)
-			prettyPrint(t)
-			indentLevel++
+			p.tokenList = append(p.tokenList, t)
+			p.unclosedCompoundTypes.Push(t)
+			p.prettyPrint(t)
+			p.indentLevel++
 
-			advance = 1
-			idx += advance
-			token = data[:advance]
+			bytesToAdvance = 1
+			p.fileIdx += bytesToAdvance
+			token = data[:bytesToAdvance]
 			return
 		case 'e':
-			switch next := unclosedCompoundTypes.Pop(); next.tokenType {
+			switch next := p.unclosedCompoundTypes.Pop(); next.tokenKind {
 			case btListStart:
-				if unclosedCompoundTypes.Peek().tokenType == btDictStart {
+				if p.unclosedCompoundTypes.Peek().tokenKind == btDictStart {
 					// This list was a value in a dict
-					shouldExpectDictKey = true
+					p.shouldExpectDictKey = true
 				}
 
 				t := btToken{btListEnd, "e", nil}
-				tokenList = append(tokenList, t)
-				indentLevel--
-				prettyPrint(t)
+				p.tokenList = append(p.tokenList, t)
+				p.indentLevel--
+				p.prettyPrint(t)
 
-				advance = 1
-				idx += advance
-				token = data[:advance]
+				bytesToAdvance = 1
+				p.fileIdx += bytesToAdvance
+				token = data[:bytesToAdvance]
 				return
 			case btDictStart:
-				if unclosedCompoundTypes.Peek().tokenType == btDictStart {
+				if p.unclosedCompoundTypes.Peek().tokenKind == btDictStart {
 					// This dict was a value in an outer dict
-					shouldExpectDictKey = true
+					p.shouldExpectDictKey = true
 				}
 
 				if next.lexeme == "INFODICT" {
-					infoDictEndIdx = idx
+					p.infoDictEndIdx = p.fileIdx
 				}
 
 				t := btToken{btDictEnd, "e", nil}
-				tokenList = append(tokenList, t)
-				indentLevel--
-				prettyPrint(t)
+				p.tokenList = append(p.tokenList, t)
+				p.indentLevel--
+				p.prettyPrint(t)
 
-				advance = 1
-				idx += advance
-				token = data[:advance]
+				bytesToAdvance = 1
+				p.fileIdx += bytesToAdvance
+				token = data[:bytesToAdvance]
 				return
 			default:
 				err = errors.New("Unrecognized token type")
 				return
 			}
 		case 'i':
-			advance = 1 // Consume i
-			tokenStartIdx := advance
+			bytesToAdvance = 1 // Consume i
+			tokenStartIdx := bytesToAdvance
 
-			for data[advance] != 'e' {
-				advance++
+			for data[bytesToAdvance] != 'e' {
+				bytesToAdvance++
 			}
 
-			token = data[tokenStartIdx:advance]
+			token = data[tokenStartIdx:bytesToAdvance]
 			lexeme := string(token)
 
 			numVal, e := strconv.Atoi(lexeme)
@@ -273,55 +285,56 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 				return
 			}
 
-			if unclosedCompoundTypes.Peek().tokenType == btDictStart {
+			if p.unclosedCompoundTypes.Peek().tokenKind == btDictStart {
 				// This number was a value in a dict
-				shouldExpectDictKey = true
+				p.shouldExpectDictKey = true
 			}
 
 			t := btToken{btNum, lexeme, numVal}
-			tokenList = append(tokenList, t)
-			prettyPrint(t)
+			p.tokenList = append(p.tokenList, t)
+			p.prettyPrint(t)
 
-			advance++ // Consume e
-			idx += advance
+			bytesToAdvance++ // Consume e
+			p.fileIdx += bytesToAdvance
 			return
 		default:
-			// bencoded string
+			// Bencoded string
 			if c >= '0' && c <= '9' {
-				for data[advance] != ':' {
-					advance++
+				for data[bytesToAdvance] != ':' {
+					bytesToAdvance++
 				}
-				strLen, e := strconv.Atoi(string(data[:advance]))
+				strLen, e := strconv.Atoi(string(data[:bytesToAdvance]))
 				if e != nil {
 					err = e
 					return
 				}
 
-				tokenStartIdx := advance + 1
-				advance += strLen + 1
-				idx += advance
+				tokenStartIdx := bytesToAdvance + 1
+				bytesToAdvance += strLen + 1
+				p.fileIdx += bytesToAdvance
 
-				token = data[tokenStartIdx:advance]
+				token = data[tokenStartIdx:bytesToAdvance]
 				lexeme := string(token)
 
 				// Assume not in a dict
 				t := btToken{btStr, lexeme, lexeme}
 
-				if unclosedCompoundTypes.Peek().tokenType == btDictStart {
-					if shouldExpectDictKey {
-						t.tokenType = btDictKey
-						shouldExpectDictKey = false
+				if p.unclosedCompoundTypes.Peek().tokenKind == btDictStart {
+					if p.shouldExpectDictKey {
+						t.tokenKind = btDictKey
+						p.shouldExpectDictKey = false
+
 						if t.lexeme == "info" {
-							infoDictStartIdx = idx
+							p.infoDictStartIdx = p.fileIdx
 						}
 					} else {
 						// This string is a dict value
-						shouldExpectDictKey = true
+						p.shouldExpectDictKey = true
 					}
 				}
 
-				tokenList = append(tokenList, t)
-				prettyPrint(t)
+				p.tokenList = append(p.tokenList, t)
+				p.prettyPrint(t)
 
 				return
 			} else {
@@ -332,6 +345,7 @@ func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	}
 
 	if !atEOF {
+		// Signal to scanner to try again and process more input
 		return 0, nil, nil
 	}
 

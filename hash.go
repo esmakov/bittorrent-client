@@ -17,6 +17,7 @@ func HashSHA1(b []byte) []byte {
 	return hash
 }
 
+// Credit: ChatGPT
 func CustomURLEscape(input []byte) string {
 	escaped := make([]byte, 0, 3*len(input))
 	hexDigits := "0123456789abcdef"
