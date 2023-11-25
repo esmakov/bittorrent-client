@@ -11,6 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+
+	"github.com/esmakov/bittorrent-client/hash"
+	"github.com/esmakov/bittorrent-client/parser"
 )
 
 func die(e error) {
@@ -24,9 +27,9 @@ func main() {
 		die(fmt.Errorf("USAGE: bittorrent-client [*.torrent]"))
 	}
 
-	p := newParser()
+	p := parser.MakeParser()
 	metaInfoMap, infoHash := p.ParseMetaInfoFile(os.Args[1])
-	escapedInfoHash := CustomURLEscape(infoHash)
+	escapedInfoHash := hash.CustomURLEscape(infoHash)
 
 	trackerURL := metaInfoMap["announce"].(string)
 	suggestedTitle := metaInfoMap["title"]

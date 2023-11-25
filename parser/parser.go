@@ -1,4 +1,4 @@
-package main
+package parser
 
 import (
 	"bufio"
@@ -7,7 +7,16 @@ import (
 	"log"
 	"os"
 	"strconv"
+
+	"github.com/esmakov/bittorrent-client/hash"
+	"github.com/esmakov/bittorrent-client/stack"
 )
+
+func die(e error) {
+	if e != nil {
+		log.Fatalln(e)
+	}
+}
 
 type btTokenKinds int
 
@@ -55,13 +64,13 @@ type parser struct {
 	infoDictEndIdx        int
 	indentLevel           int
 	shouldExpectDictKey   bool
-	unclosedCompoundTypes stack[btToken]
+	unclosedCompoundTypes stack.Stack[btToken]
 	splitFun              bufio.SplitFunc
 }
 
-func newParser() *parser {
-	stack := newStack[btToken]()
-	return &parser{
+func MakeParser() parser {
+	stack := stack.NewStack[btToken]()
+	return parser{
 		unclosedCompoundTypes: stack,
 	}
 }
@@ -82,7 +91,7 @@ func (p *parser) ParseMetaInfoFile(file string) (map[string]any, []byte) {
 		log.Fatalln("Didn't find info dict ending")
 	}
 	infoDictBytes := fileBytes[p.infoDictStartIdx : p.infoDictEndIdx+1]
-	infoHash := HashSHA1(infoDictBytes)
+	infoHash := hash.HashSHA1(infoDictBytes)
 
 	// Ignore start of dict
 	if _, err := p.consumeToken(); err != nil {

@@ -1,16 +1,17 @@
-package main
+package stack
+
 // Credit: Michael Green
-// https://stackoverflow.com/questions/28541609/looking-for-reasonable-stack-implementation-in-golang
-type stack[T any] struct {
+// https://stackoverflow.com/questions/28541609/looking-for-reasonable-Stack-implementation-in-golang
+type Stack[T any] struct {
 	Push   func(T)
 	Pop    func() T
 	Peek   func() T
 	Length func() int
 }
 
-func newStack[T any]() stack[T] {
+func NewStack[T any]() Stack[T] {
 	slice := make([]T, 0)
-	return stack[T]{
+	return Stack[T]{
 		Push: func(i T) {
 			slice = append(slice, i)
 		},
