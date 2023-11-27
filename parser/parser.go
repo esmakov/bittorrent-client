@@ -68,7 +68,7 @@ type parser struct {
 	splitFun              bufio.SplitFunc
 }
 
-func MakeParser() parser {
+func New() parser {
 	stack := stack.NewStack[btToken]()
 	return parser{
 		unclosedCompoundTypes: stack,
@@ -196,12 +196,12 @@ func (p *parser) parseEntry() (k string, v any, e error) {
 	return
 }
 
-func (p *parser) prettyPrint(t btToken) {
+func (p parser) prettyPrint(t btToken) {
 	// TODO: Enable with command line arg
-	// for i := indentLevel; i > 0; i-- {
+	// for i := p.indentLevel; i > 0; i-- {
 	// 	fmt.Print("\t")
 	// }
-	// fmt.Println(t.tokenType, t.lexeme)
+	// fmt.Println(t.tokenKind, t.lexeme)
 }
 
 func (p *parser) splitFunc(data []byte, atEOF bool) (bytesToAdvance int, token []byte, err error) {

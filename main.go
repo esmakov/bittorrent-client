@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 
 	"github.com/esmakov/bittorrent-client/hash"
 	"github.com/esmakov/bittorrent-client/parser"
@@ -24,92 +26,103 @@ func die(e error) {
 
 func main() {
 	if len(os.Args) != 2 {
-		die(fmt.Errorf("USAGE: bittorrent-client [*.torrent]"))
+		die(errors.New("USAGE: bittorrent-client [*.torrent]"))
 	}
 
-	p := parser.MakeParser()
+	p := parser.New()
 	metaInfoMap, infoHash := p.ParseMetaInfoFile(os.Args[1])
 	escapedInfoHash := hash.CustomURLEscape(infoHash)
 
 	trackerURL := metaInfoMap["announce"].(string)
-	suggestedTitle := metaInfoMap["title"]
 	comment := metaInfoMap["comment"]
 
-	// Fields common to single-file and multi-file torrents
 	infoDict := metaInfoMap["info"].(map[string]any)
-	pieceLength := infoDict["piece length"]
+
+	// Fields common to single-file and multi-file torrents
+	pieceLength := infoDict["piece length"].(int)
 	_ = pieceLength
-	pieces := infoDict["pieces"]
+	pieces := infoDict["pieces"].(string)
 	_ = pieces
 	isPrivate := infoDict["private"]
 	_ = isPrivate
 
-	files := infoDict["files"].([]any)
+	peerId, peerIdBytes := getPeerId()
 
-	peerId := getPeerId()
-	peerIdBytes := make([]byte, len(peerId))
-	copy(peerIdBytes, peerId)
-
-	var totalSize int
-	var numFiles = len(files)
 	var fileMode string
+	files := infoDict["files"]
 	if files != nil {
 		fileMode = "multiple"
 	} else {
 		fileMode = "single"
 	}
 
-	// TODO: Handle single-file mode
+	var totalSize int
+	numFiles := 1
 
 	if fileMode == "multiple" {
+		files := files.([]any)
+		numFiles = len(files)
+
 		for _, v := range files {
 			fileDict := v.(map[string]any)
 
-			length := fileDict["length"]
-			totalSize += length.(int)
+			length := fileDict["length"].(int)
+			totalSize += length
 
 			pl := fileDict["path"].([]any)
-			pathList := make([]string, len(pl))
-			for i, v := range pl {
-				pathList[i] = v.(string)
+			var pathList []string
+			for _, v := range pl {
+				pathList = append(pathList, v.(string))
 			}
+
 			// fmt.Println(strings.Join(pathList, "/"), length, "bytes")
 		}
+	} else if fileMode == "single" {
+		name := infoDict["name"].(string)
+		_ = name
+		length := infoDict["length"].(int)
+		totalSize += length
 	}
 
 	printStatus := func() {
 		fmt.Println("------------------------------------------")
-		fmt.Println("Name:", suggestedTitle)
-		fmt.Println("Hash:", fmt.Sprintf("%x", infoHash))
-		fmt.Println("Path:", os.Args[1])
+		fmt.Println("File path:", os.Args[1])
+		fmt.Println("Tracker:", trackerURL)
+		fmt.Println("Hash:", fmt.Sprintf("% x", infoHash))
 		fmt.Println("Total size:", totalSize)
 		fmt.Println("# of files:", numFiles)
-		fmt.Println("Comments:", comment)
-		fmt.Println("Tracker:", trackerURL)
+		if comment != nil {
+			fmt.Println("Comment:", comment)
+		}
 	}
 	printStatus()
 
-	myPort := getNextFreePort()
-	uploadedParan := "0"
+	portForTrackerResponse := getNextFreePort()
+	uploadedParam := "0"
 	downloadedParam := "0"
-	leftParam := "0"
+	leftParam := strconv.Itoa(totalSize)
 
-	uri := url.URL{
+	trackerStartURL := url.URL{
 		Opaque: trackerURL,
 	}
 	queryParams := url.Values{}
-	queryParams.Set("peerId", peerId)
-	queryParams.Set("port", myPort)
-	queryParams.Set("uploaded", uploadedParan)
+	queryParams.Set("peer_id", peerId)
+	queryParams.Set("port", portForTrackerResponse)
+	queryParams.Set("uploaded", uploadedParam)
 	queryParams.Set("downloaded", downloadedParam)
 	queryParams.Set("left", leftParam)
 	queryParams.Set("event", "started")
-	uri.RawQuery = "info_hash=" + escapedInfoHash + "&" + queryParams.Encode()
+	queryParams.Set("compact", "1")
+	trackerStartURL.RawQuery = "info_hash=" + escapedInfoHash + "&" + queryParams.Encode()
 
-	startReq, err := http.NewRequest("GET", uri.String(), nil)
+	startReq, err := http.NewRequest("GET", trackerStartURL.String(), nil)
 	die(err)
 
-	// fmt.Println(uri.String())
+	startReq.Close = true
+	startReq.Header.Set("Connection", "close")
+
+	// fmt.Println(startReq.Header)
+	// fmt.Println(trackerStartURL.String())
 	// return
 
 	client := &http.Client{}
@@ -138,21 +151,22 @@ func main() {
 		_ = trackerId.(string)
 	}
 
-	numSeeders := response["complete"].(int)
-	_ = numSeeders
+	if numSeeders, ok := response["complete"]; ok {
+		_ = numSeeders.(int)
+	}
 
-	numLeechers := response["incomplete"].(int)
-	_ = numLeechers
+	if numLeechers, ok := response["incomplete"]; ok {
+		_ = numLeechers.(int)
+	}
 
-	// TODO: Handle dictionary model
+	// TODO: Handle dictionary model of peer list
 	peerBytes := response["peers"].(string)
-
-	// TODO: Handle case where peer is specified by host name
 	peerList, err := extractCompactPeers(peerBytes)
 	die(err)
 
 	if len(peerList) == 0 {
-		log.Fatalln("No peers for torrent:", suggestedTitle)
+		// TODO: Keep intermittently checking for peers in a separate goroutine
+		log.Fatalln("No peers for torrent:", os.Args[1])
 	}
 
 	fmt.Println(peerList)
@@ -162,8 +176,11 @@ func main() {
 	establishPeerConnection(handshakeMsg, peerList[0])
 }
 
-func getPeerId() string {
-	return "edededededededededed"
+func getPeerId() (string, []byte) {
+	peerId := "edededededededededed"
+	peerIdBytes := make([]byte, len(peerId))
+	copy(peerIdBytes, peerId)
+	return peerId, peerIdBytes
 }
 
 func getNextFreePort() string {
@@ -177,7 +194,7 @@ func extractCompactPeers(s string) ([]string, error) {
 		return nil, errors.New("Peer information must be a multiple of 6 bytes")
 	}
 
-	for i := 0; i < len(s); {
+	for i := 0; i < len(s)-2; {
 		ip := ""
 		for j := 0; j < 4; j++ {
 			ip += fmt.Sprintf("%d", s[i])
@@ -187,10 +204,15 @@ func extractCompactPeers(s string) ([]string, error) {
 			i++
 		}
 		ip += ":"
-		for j := 0; j < 2; j++ {
-			ip += fmt.Sprintf("%d", s[i])
-			i++
-		}
+
+		var portVal uint16
+		portBytes := []byte(s[i : i+2])
+		portVal = binary.BigEndian.Uint16(portBytes)
+		ip += strconv.Itoa(int(portVal))
+
+		// Skip 2 bytes for the port
+		i += 2
+
 		list = append(list, ip)
 	}
 
@@ -231,16 +253,18 @@ func concatMultipleSlices[T any](slices [][]T) []T {
 func establishPeerConnection(handshakeMsg []byte, peerAddr string) {
 	c, err := net.Dial("tcp", peerAddr)
 	die(err)
+	defer c.Close()
 
 	if _, err := c.Write(handshakeMsg); err != nil {
 		log.Fatalln(err)
 	}
 	// for {
-	var response string
-	fmt.Fscan(c, &response)
-	fmt.Println(response)
+	bytes, err := io.ReadAll(c)
+	die(err)
+	fmt.Println(bytes)
 	// }
-	c.Close()
+
+	// TODO: Check if peer_id is as expected (if dictionary model)
 }
 
 // Messages of form: <4-byte big-Endian length>[message ID][payload]
