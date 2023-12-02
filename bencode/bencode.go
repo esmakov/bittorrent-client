@@ -1,24 +1,33 @@
 package bencode
 
 import (
+	"errors"
 	"fmt"
-	"log"
 )
 
-func Bencode(data any) (s string) {
+func Bencode(data any) (string, error) {
+	s := ""
 	switch t := data.(type) {
 	case string:
 		s += bencodeString(t)
 	case int:
 		s += bencodeInt(t)
 	case map[string]any:
-		s += bencodeDict(t)
+		res, err := bencodeDict(t)
+		if err != nil {
+			return "", err
+		}
+		s += res
 	case []any:
-		s += bencodeList(t)
+		res, err := bencodeList(t)
+		if err != nil {
+			return "", err
+		}
+		s += res
 	default:
-		log.Fatalln("Could not assert type")
+		return "", errors.New("Could not extract type out of data to be bencoded")
 	}
-	return
+	return s, nil
 }
 
 func bencodeString(s string) string {
@@ -29,21 +38,29 @@ func bencodeInt(i int) string {
 	return "i" + fmt.Sprintf("%d", i) + "e"
 }
 
-func bencodeDict(d map[string]any) (s string) {
-	s += "d"
+func bencodeDict(d map[string]any) (string, error) {
+	s := "d"
 	for k, v := range d {
 		s += bencodeString(k)
-		s += Bencode(v)
+		res, err := Bencode(v)
+		if err != nil {
+			return "", err
+		}
+		s += res
 	}
 	s += "e"
-	return
+	return s, nil
 }
 
-func bencodeList(l []any) (s string) {
-	s += "l"
+func bencodeList(l []any) (string, error) {
+	s := "l"
 	for _, v := range l {
-		s += Bencode(v)
+		res, err := Bencode(v)
+		if err != nil {
+			return "", err
+		}
+		s += res
 	}
 	s += "e"
-	return
+	return s, nil
 }

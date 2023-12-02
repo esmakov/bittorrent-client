@@ -6,15 +6,15 @@ import (
 	"io"
 )
 
-func HashSHA1(b []byte) []byte {
+func HashSHA1(b []byte) ([]byte, error) {
 	h := sha1.New()
 	rdr := bytes.NewReader(b)
 	if _, err := io.Copy(h, rdr); err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	hash := h.Sum(nil)
-	return hash
+	return hash, nil
 }
 
 // Credit: ChatGPT

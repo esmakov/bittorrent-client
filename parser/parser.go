@@ -3,20 +3,14 @@ package parser
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
-	"log"
 	"os"
 	"strconv"
 
 	"github.com/esmakov/bittorrent-client/hash"
 	"github.com/esmakov/bittorrent-client/stack"
 )
-
-func die(e error) {
-	if e != nil {
-		log.Fatalln(e)
-	}
-}
 
 type btTokenKinds int
 
@@ -66,44 +60,61 @@ type parser struct {
 	shouldExpectDictKey   bool
 	unclosedCompoundTypes stack.Stack[btToken]
 	splitFun              bufio.SplitFunc
+	shouldPrettyPrint     bool
 }
 
-func New() parser {
+func New(shouldPrettyPrint bool) parser {
 	stack := stack.NewStack[btToken]()
 	return parser{
 		unclosedCompoundTypes: stack,
+		shouldPrettyPrint:     shouldPrettyPrint,
 	}
 }
 
 /*
-Assumes that the provided file is a correctly-formatted metainfo file.
+NOTE: Assumes that the provided file is a correctly-formatted metainfo file.
 */
-func (p *parser) ParseMetaInfoFile(file string) (map[string]any, []byte) {
+func (p *parser) ParseMetaInfoFile(file string) (map[string]any, []byte, error) {
 	fd, err := os.Open(file)
-	die(err)
+	if err != nil {
+		return nil, nil, err
+	}
 	defer fd.Close()
 
-	p.bdecode(fd)
+	if err := p.bdecode(fd); err != nil {
+		return nil, nil, err
+	}
 
 	// Extract info hash verbatim
-	fileBytes, _ := os.ReadFile(file)
-	if p.infoDictEndIdx == 0 {
-		log.Fatalln("Didn't find info dict ending")
+	fileBytes, err := os.ReadFile(file)
+	if err != nil {
+		return nil, nil, err
 	}
+
+	if p.infoDictStartIdx == 0 || p.infoDictEndIdx == 0 {
+		return nil, nil, errors.New("Didn't find info dict start or end")
+	}
+	if p.infoDictEndIdx > len(fileBytes) {
+		return nil, nil, errors.New("Tried to take a substring out of range of the file")
+	}
+
 	infoDictBytes := fileBytes[p.infoDictStartIdx : p.infoDictEndIdx+1]
-	infoHash := hash.HashSHA1(infoDictBytes)
-
-	// Ignore start of dict
-	if _, err := p.consumeToken(); err != nil {
-		log.Fatalln(err)
+	infoHash, err := hash.HashSHA1(infoDictBytes)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// Recursively parse the tokens in the list
-	return p.parseDict(), infoHash
+	// Skip start of dict
+	if _, err := p.consumeToken(); err != nil {
+		return nil, nil, err
+	}
+
+	topLevelDict := p.parseDict()
+	return topLevelDict, infoHash, nil
 }
 
 // While scanning, builds up the token list and populates indices around "info" dictionary
-func (p *parser) bdecode(r io.Reader) {
+func (p *parser) bdecode(r io.Reader) error {
 	scan := bufio.NewScanner(r)
 	// TODO: Use smaller buffer
 	const START_BUFFER_SIZE = 512 * 1024
@@ -114,16 +125,23 @@ func (p *parser) bdecode(r io.Reader) {
 
 	for scan.Scan() {
 	}
+
+	if err := scan.Err(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func (p *parser) ParseResponse(r io.Reader) map[string]any {
+func (p *parser) ParseResponse(r io.Reader) (map[string]any, error) {
 	p.bdecode(r)
 
 	// Ignore start of dict
 	if _, err := p.consumeToken(); err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
-	return p.parseDict()
+
+	return p.parseDict(), nil
 }
 
 func (p *parser) parse(t btToken) any {
@@ -145,6 +163,7 @@ func (p *parser) consumeToken() (btToken, error) {
 	if len(p.tokenList) == 0 {
 		return *new(btToken), errors.New("End of list")
 	}
+
 	t := p.tokenList[0]
 	p.tokenList = p.tokenList[1:]
 	return t, nil
@@ -197,11 +216,13 @@ func (p *parser) parseEntry() (k string, v any, e error) {
 }
 
 func (p parser) prettyPrint(t btToken) {
-	// TODO: Enable with command line arg
-	// for i := p.indentLevel; i > 0; i-- {
-	// 	fmt.Print("\t")
-	// }
-	// fmt.Println(t.tokenKind, t.lexeme)
+	if !p.shouldPrettyPrint {
+		return
+	}
+	for i := p.indentLevel; i > 0; i-- {
+		fmt.Print("\t")
+	}
+	fmt.Println(t.tokenKind, t.lexeme)
 }
 
 func (p *parser) splitFunc(data []byte, atEOF bool) (bytesToAdvance int, token []byte, err error) {
