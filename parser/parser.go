@@ -81,7 +81,7 @@ func (p *parser) ParseMetaInfoFile(file string) (map[string]any, []byte, error) 
 	}
 	defer fd.Close()
 
-	if err := p.bdecode(fd); err != nil {
+	if err := p.bDecode(fd); err != nil {
 		return nil, nil, err
 	}
 
@@ -114,7 +114,7 @@ func (p *parser) ParseMetaInfoFile(file string) (map[string]any, []byte, error) 
 }
 
 // While scanning, builds up the token list and populates indices around "info" dictionary
-func (p *parser) bdecode(r io.Reader) error {
+func (p *parser) bDecode(r io.Reader) error {
 	scan := bufio.NewScanner(r)
 	// TODO: Use smaller buffer
 	const START_BUFFER_SIZE = 512 * 1024
@@ -134,7 +134,9 @@ func (p *parser) bdecode(r io.Reader) error {
 }
 
 func (p *parser) ParseResponse(r io.Reader) (map[string]any, error) {
-	p.bdecode(r)
+	if err := p.bDecode(r); err != nil {
+		return nil, err
+	}
 
 	// Ignore start of dict
 	if _, err := p.consumeToken(); err != nil {

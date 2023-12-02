@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/esmakov/bittorrent-client/hash"
 	"github.com/esmakov/bittorrent-client/parser"
@@ -54,11 +56,10 @@ func main() {
 		die(errors.New("USAGE: bittorrent-client [*.torrent]"))
 	}
 
-	var shouldPrettyPrint bool
-	if slices.Contains(os.Args, "-print") {
-		shouldPrettyPrint = true
-	}
-	p := parser.New(shouldPrettyPrint)
+	shouldPrettyPrint := flag.Bool("print", false, "Pretty print the metainfo file parse tree")
+	flag.Parse()
+
+	p := parser.New(*shouldPrettyPrint)
 
 	inputFileName := os.Args[1]
 	metaInfoMap, infoHash, err := p.ParseMetaInfoFile(inputFileName)
@@ -139,36 +140,256 @@ func main() {
 		log.Println("TRACKER WARNING:", warning.(string))
 	}
 
-	waitInterval := trackerResponse["interval"].(int)
-	_ = waitInterval
+	// 	waitInterval := trackerResponse["interval"].(int)
+	// 	_ = waitInterval
 
-	if trackerId, ok := trackerResponse["tracker id"]; ok {
-		// TODO: Include on future requests
-		_ = trackerId.(string)
-	}
+	// 	if trackerId, ok := trackerResponse["tracker id"]; ok {
+	// 		// TODO: Include on future requests
+	// 		_ = trackerId.(string)
+	// 	}
 
-	if numSeeders, ok := trackerResponse["complete"]; ok {
-		_ = numSeeders.(int)
-	}
+	// 	if numSeeders, ok := trackerResponse["complete"]; ok {
+	// 		_ = numSeeders.(int)
+	// 	}
 
-	if numLeechers, ok := trackerResponse["incomplete"]; ok {
-		_ = numLeechers.(int)
-	}
+	// 	if numLeechers, ok := trackerResponse["incomplete"]; ok {
+	// 		_ = numLeechers.(int)
+	// 	}
 
 	// TODO: Handle dictionary model of peer list
-	peerStr := trackerResponse["peers"].(string)
-	peerList, err := extractCompactPeers(peerStr)
-	die(err)
+	peersStr := trackerResponse["peers"].(string)
+	peerList, err := extractCompactPeers(peersStr)
+	if err != nil {
+		log.Println(err)
+	}
 
 	if len(peerList) == 0 {
 		// TODO: Keep intermittently checking for peers in a separate goroutine
-		log.Fatalln("No peers for torrent:", inputFileName)
+		log.Println("No peers for torrent:", inputFileName)
 	}
 
-	fmt.Println(peerList)
+	// fmt.Println(peerList)
 
-	handshakeMsg := getHandshake(infoHash, peerIdBytes)
-	establishPeerConnection(handshakeMsg, peerList[0])
+	handshakeMsg := createHandshakeMsg(infoHash, peerIdBytes)
+	// TODO: Create multiple concurrent connections
+	for _, peer := range peerList {
+		if err := establishPeerConnection(handshakeMsg, t.infoHash, peer); err != nil {
+			log.Println(err)
+		}
+	}
+}
+
+// Messages of form: <4-byte big-Endian length>[message ID][payload]
+var (
+	keepaliveBytes     = []byte{0x00, 0x00, 0x00, 0x00}
+	chokeBytes         = []byte{0x00, 0x00, 0x00, 0x01, 0x00}
+	unchokeBytes       = []byte{0x00, 0x00, 0x00, 0x01, 0x01}
+	interestedBytes    = []byte{0x00, 0x00, 0x00, 0x01, 0x02}
+	notinterestedBytes = []byte{0x00, 0x00, 0x00, 0x01, 0x03}
+	// TODO: have, bitfield, request, piece, cancel, port
+)
+
+type peerConnState struct {
+	am_choking      bool
+	am_interested   bool
+	peer_choking    bool
+	peer_interested bool
+}
+
+// TODO: Check if peer_id is as expected (if dictionary model)
+func establishPeerConnection(handshakeMsg, expectedInfoHash []byte, peerAddr string) error {
+	conn, err := net.DialTimeout("tcp", peerAddr, time.Millisecond*500)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	log.Println("Connection established with peer", peerAddr)
+
+	if _, err := conn.Write(handshakeMsg); err != nil {
+		return err
+	}
+
+	msgBuf := make([]byte, 512)
+
+	// for {
+	numRead, err := conn.Read(msgBuf)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Saw one message of length:", numRead)
+	msgList, err := parseMultiMessage(msgBuf[:numRead], expectedInfoHash)
+	_ = msgList
+	if err != nil {
+		return err
+	}
+
+	clear(msgBuf)
+	// }
+
+	// connState := peerConnState{}
+	// fmt.Printf("%+v\n", connState)
+
+	// read bitfield and choose one of its nonzero indices
+	// send request msg
+
+	return nil
+}
+
+type messageKinds int
+
+const (
+	choke messageKinds = iota
+	unchoke
+	interested
+	uninterested
+	have
+	bitfield
+	request
+	piece
+	cancel
+	port
+	keepalive
+	handshake
+)
+
+type peerMessage struct {
+	kind        messageKinds
+	endIdx      int
+	pieceIdx    int
+	bitfield    []byte
+	blockOffset int
+	blockLen    int
+	blockData   []byte
+}
+
+func parseMultiMessage(buf, expectedInfoHash []byte) ([]peerMessage, error) {
+	var msgList []peerMessage
+	for i := 0; i < len(buf)-1; {
+		fmt.Println("Starting to parse at idx:", i)
+		msg, err := parseMessage(buf[i:], expectedInfoHash)
+		if err != nil {
+			return nil, err
+		}
+		msgList = append(msgList, msg)
+		fmt.Printf("Messages: %+v\n", msgList)
+		i += msg.endIdx
+	}
+	return msgList, nil
+}
+
+func parseMessage(buf, expectedInfoHash []byte) (peerMessage, error) {
+	var msg peerMessage
+
+	// If a peer supplies an invalid handshake, close the connection
+	if int(buf[0]) == 19 {
+		msg, err := verifyHandshake(buf, expectedInfoHash)
+		if err != nil {
+			return *new(peerMessage), err
+		}
+		return msg, nil
+	}
+
+	if len(buf) == 4 {
+		msg.kind = keepalive
+		msg.endIdx = 4
+		return msg, nil
+	}
+
+	fmt.Printf("Msg contents: % x\n", buf)
+	fmt.Printf("Bytes for msg length: % x\n", buf[:4])
+	lenVal := int(binary.BigEndian.Uint32(buf[:4]))
+	fmt.Println("Message length as int:", lenVal)
+
+	messageKind := int(buf[4])
+	// fmt.Println("Message kind", messageKind)
+
+	var lenWithoutPrefix int
+
+	switch messageKinds(messageKind) {
+	case choke:
+		msg.kind = choke
+		lenWithoutPrefix = 1
+	case unchoke:
+		msg.kind = unchoke
+		lenWithoutPrefix = 1
+	case interested:
+		msg.kind = interested
+		lenWithoutPrefix = 1
+	case uninterested:
+		msg.kind = uninterested
+		lenWithoutPrefix = 1
+	case have:
+		msg.kind = have
+		lenWithoutPrefix = 5
+	case bitfield:
+		msg.kind = bitfield
+		lenWithoutPrefix = 1 + lenVal
+	case request:
+		msg.kind = request
+		lenWithoutPrefix = 13
+	case piece:
+		msg.kind = piece
+		lenWithoutPrefix = 9 + lenVal
+	case cancel:
+		msg.kind = cancel
+		lenWithoutPrefix = 13
+	case port:
+		msg.kind = port
+		lenWithoutPrefix = 3
+	}
+
+	if msg.kind == have || msg.kind == request || msg.kind == piece || msg.kind == cancel {
+		msg.pieceIdx = int(binary.BigEndian.Uint32(buf[5:9]))
+	}
+
+	msg.endIdx = lenWithoutPrefix + 3 // Add bytes for length prefix
+
+	if msg.endIdx > len(buf) {
+		return *new(peerMessage), errors.New("Out of bounds")
+	}
+
+	// Handle variable length messages
+	// if !(msg.kind == bitfield || msg.kind == piece) {
+	// 	return msg, nil
+	// }
+
+	switch msg.kind {
+	case bitfield:
+		msg.bitfield = buf[5:msg.endIdx]
+	case request:
+		msg.blockOffset = int(binary.BigEndian.Uint32(buf[9:13]))
+		msg.blockLen = int(binary.BigEndian.Uint32(buf[13:msg.endIdx]))
+	case piece:
+		msg.blockOffset = int(binary.BigEndian.Uint32(buf[9:13]))
+		msg.blockData = buf[13:msg.endIdx]
+	}
+
+	return msg, nil
+}
+
+func verifyHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
+	// if len(buf) != 68 {
+	// 	return errors.New("Handshake is not typical for BitTorrent Protocol 1.0")
+	// }
+	msg := peerMessage{}
+	protocolLen := int(buf[0]) // Should be 19
+	// protocolBytes := buf[1 : protocolLen+1]
+	// fmt.Println(string(protocolBytes))
+	// reservedBytes := buf[protocolLen+1 : protocolLen+9]
+
+	// Skip reserved bytes
+	theirInfoHash := buf[protocolLen+9 : protocolLen+29]
+	if !slices.Equal(theirInfoHash, expectedInfoHash) {
+		return msg, errors.New("Peer did not respond with correct info hash")
+	}
+	peerId := buf[protocolLen+29 : protocolLen+49]
+	fmt.Println("Peer has id", string(peerId))
+
+	msg.kind = handshake
+	msg.endIdx = protocolLen + 49
+	return msg, nil
 }
 
 func getPeerId() (string, []byte) {
@@ -192,9 +413,7 @@ func sendTrackerMessage(peerId, portForTrackerResponse, uploadedParam, downloade
 	queryParams.Set("uploaded", uploadedParam)
 	queryParams.Set("downloaded", downloadedParam)
 	queryParams.Set("left", leftParam)
-	if event != "" {
-		queryParams.Set("event", event)
-	}
+	queryParams.Set("event", event)
 	queryParams.Set("compact", "1")
 	reqURL.RawQuery = "info_hash=" + escapedInfoHash + "&" + queryParams.Encode()
 
@@ -264,7 +483,7 @@ func extractCompactPeers(s string) ([]string, error) {
 }
 
 // handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
-func getHandshake(infoHash []byte, peerId []byte) []byte {
+func createHandshakeMsg(infoHash []byte, peerId []byte) []byte {
 	pstr := "BitTorrent protocol"
 	pstrBytes := make([]byte, len(pstr))
 	copy(pstrBytes, pstr)
@@ -292,46 +511,4 @@ func concatMultipleSlices[T any](slices [][]T) []T {
 	}
 
 	return result
-}
-
-// TODO: Check if peer_id is as expected (if dictionary model)
-func establishPeerConnection(handshakeMsg []byte, peerAddr string) error {
-	c, err := net.Dial("tcp", peerAddr)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	log.Println("Connection established with:", peerAddr)
-
-	if _, err := c.Write(handshakeMsg); err != nil {
-		return err
-	}
-
-	// for {
-	bytes, err := io.ReadAll(c)
-	if err != nil {
-		return err
-	}
-	fmt.Println(len(bytes), bytes)
-	// }
-
-	return nil
-}
-
-// Messages of form: <4-byte big-Endian length>[message ID][payload]
-var (
-	keepalive     = []byte{0x00, 0x00, 0x00, 0x00}
-	choke         = []byte{0x00, 0x00, 0x00, 0x01, 0x00}
-	unchoke       = []byte{0x00, 0x00, 0x00, 0x01, 0x01}
-	interested    = []byte{0x00, 0x00, 0x00, 0x01, 0x02}
-	notinterested = []byte{0x00, 0x00, 0x00, 0x01, 0x03}
-	// TODO: have, bitfield, request, piece, cancel, port
-)
-
-type peerConnectionState struct {
-	am_choking      bool
-	am_interested   bool
-	peer_choking    bool
-	peer_interested bool
 }
