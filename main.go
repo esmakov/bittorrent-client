@@ -53,7 +53,8 @@ func (t torrentInfo) String() string {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(errors.New("USAGE: bittorrent-client [*.torrent]"))
+		fmt.Println("USAGE: bittorrent-client [*.torrent]")
+		os.Exit(2)
 	}
 
 	shouldPrettyPrint := flag.Bool("print", false, "Pretty print the metainfo file parse tree")
@@ -61,7 +62,7 @@ func main() {
 
 	p := parser.New(*shouldPrettyPrint)
 
-	inputFileName := os.Args[1]
+	inputFileName := flag.Args()[0]
 	metaInfoMap, infoHash, err := p.ParseMetaInfoFile(inputFileName)
 	if err != nil {
 		log.Println(err)
