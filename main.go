@@ -26,6 +26,7 @@ type torrent struct {
 	trackerHostname  string
 	infoHash         []byte
 	totalSize        int
+	pieceHashes      map[int]string
 	files            int
 	comment          string
 	left             int
@@ -34,15 +35,33 @@ type torrent struct {
 	trackerId        string
 	seeders          int
 	leechers         int
+	isPrivate        bool
 }
 
-func newTorrent(metaInfoFileName, trackerHostname, comment string, infoHash []byte) *torrent {
+func newTorrent(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte, pieceHashes map[int]string) *torrent {
+	// Fields common to single-file and multi-file torrents
+	trackerHostname := metaInfoMap["announce"].(string)
+	infoMap := metaInfoMap["info"].(map[string]any)
+
+	// Optional common fields
+	var comment string
+	if commentEntry, ok := metaInfoMap["comment"]; ok {
+		comment = commentEntry.(string)
+	}
+
+	var isPrivate int
+	if isPrivateEntry, ok := infoMap["private"]; ok {
+		isPrivate = isPrivateEntry.(int)
+	}
+
 	return &torrent{
 		metaInfoFileName: metaInfoFileName,
 		trackerHostname:  trackerHostname,
 		comment:          comment,
 		infoHash:         infoHash,
 		files:            1,
+		pieceHashes:      pieceHashes,
+		isPrivate:        isPrivate != 0,
 	}
 }
 
@@ -73,43 +92,30 @@ func main() {
 	p := parser.New(*shouldPrettyPrint)
 
 	metaInfoFileName := flag.Args()[0]
-	metaInfoMap, infoHash, err := p.ParseMetaInfoFile(metaInfoFileName)
+	topLevelMap, infoHash, err := p.ParseMetaInfoFile(metaInfoFileName)
 	if err != nil {
 		log.Println(err)
 	}
 
-	// Fields common to single-file and multi-file torrents
-	trackerHostname := metaInfoMap["announce"].(string)
-	infoDict := metaInfoMap["info"].(map[string]any)
-	pieceLength := infoDict["piece length"].(int)
+	infoMap := topLevelMap["info"].(map[string]any)
+	pieceLength := infoMap["piece length"].(int)
 	_ = pieceLength
-	concatPieceHashes := infoDict["pieces"].(string)
-	_ = concatPieceHashes
+	concatPieceHashes := infoMap["pieces"].(string)
 
-	// Optional common fields
-	isPrivate := 0
-	if isPrivateEntry, ok := infoDict["private"]; ok {
-		isPrivate = isPrivateEntry.(int)
+	pieceHashes, err := p.MapPieceIndicesToHashes(concatPieceHashes)
+	if err != nil {
+		log.Println(err)
 	}
-	_ = isPrivate
-	comment := ""
-	if commentEntry, ok := metaInfoMap["comment"]; ok {
-		comment = commentEntry.(string)
-	}
+
+	t := newTorrent(metaInfoFileName, topLevelMap, infoHash, pieceHashes)
 
 	var fileMode string
-	files := infoDict["files"]
+	files := infoMap["files"]
 	if files != nil {
 		fileMode = "multiple"
 	} else {
 		fileMode = "single"
 	}
-
-	// pieceHashes, err := hash.HashPieces(pieces, pieceLength)
-	// if err != nil {
-	// 	log.Println(err)
-	// }
-	t := newTorrent(metaInfoFileName, trackerHostname, comment, infoHash)
 
 	if fileMode == "multiple" {
 		files := files.([]any)
@@ -130,9 +136,9 @@ func main() {
 			// fmt.Println(strings.Join(pathList, "/"), length, "bytes")
 		}
 	} else if fileMode == "single" {
-		name := infoDict["name"].(string)
+		name := infoMap["name"].(string)
 		_ = name
-		length := infoDict["length"].(int)
+		length := infoMap["length"].(int)
 		t.totalSize += length
 	}
 
@@ -143,7 +149,7 @@ func main() {
 	portForTrackerResponse := getNextFreePort()
 	event := "started" // TODO: Enum
 
-	trackerResponse, err := sendTrackerMessage(*t, myPeerId, portForTrackerResponse, trackerHostname, event)
+	trackerResponse, err := sendTrackerMessage(*t, myPeerId, portForTrackerResponse, event)
 	if err != nil {
 		log.Println(err)
 	}
@@ -181,6 +187,7 @@ func main() {
 	}
 
 	handshakeMsg := createHandshakeMsg(infoHash, myPeerIdBytes)
+	_ = handshakeMsg
 
 	// TODO: Create multiple concurrent connections
 	const MAX_PEERS = 5
@@ -266,13 +273,29 @@ func (m messageKinds) String() string {
 }
 
 type peerMessage struct {
-	kind           messageKinds
-	endIdxInMsg    int
-	pieceIdxInFile int
-	bitfield       []byte
-	blockOffset    int
-	blockLen       int
-	blockData      []byte
+	kind            messageKinds
+	endIdxInPacket  int
+	pieceFileOffset int
+	bitfield        []byte
+	blockOffset     int
+	blockLen        int
+	blockData       []byte
+}
+
+type pieceData struct {
+	data       []byte
+	fileOffset int
+}
+
+func (p pieceData) isValidPiece(pieceHashes map[int]string) (bool, error) {
+	if len(p.data) == 0 {
+		return false, errors.New("Not enough data was supplied")
+	}
+	givenHash, err := hash.HashSHA1(p.data)
+	if err != nil {
+		return false, err
+	}
+	return string(givenHash) == pieceHashes[p.fileOffset], nil
 }
 
 // TODO: Check if peer_id is as expected (if dictionary model)
@@ -323,7 +346,7 @@ func establishPeerConnection(handshakeMsg, expectedInfoHash []byte, peerAddr str
 
 		for i := 0; i < len(msgList)-1; i++ {
 			if msgList[i+1].kind == partial {
-				clearUpTo = msgList[i].endIdxInMsg
+				clearUpTo = msgList[i].endIdxInPacket
 			}
 		}
 
@@ -333,7 +356,6 @@ func establishPeerConnection(handshakeMsg, expectedInfoHash []byte, peerAddr str
 		// read bitfield and choose one of its pieces
 		// send request msg
 	}
-
 }
 
 // Peers sometimes send multiple messages per packet
@@ -346,7 +368,7 @@ func parseMultiMessage(buf, expectedInfoHash []byte) ([]peerMessage, error) {
 		}
 		fmt.Println(msg.kind)
 		msgList = append(msgList, msg)
-		i += msg.endIdxInMsg
+		i += msg.endIdxInPacket
 	}
 	return msgList, nil
 }
@@ -364,7 +386,7 @@ func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
 
 	if len(buf) == 4 {
 		msg.kind = keepalive
-		msg.endIdxInMsg = 4
+		msg.endIdxInPacket = 4
 		return
 	}
 
@@ -374,7 +396,7 @@ func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
 	if lenVal > len(buf) {
 		// Message needs to be reassembled from multiple TCP packets
 		msg.kind = partial
-		msg.endIdxInMsg = len(buf)
+		msg.endIdxInPacket = len(buf)
 		return
 	}
 
@@ -416,25 +438,25 @@ func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
 	}
 
 	if msg.kind == have || msg.kind == request || msg.kind == piece || msg.kind == cancel {
-		msg.pieceIdxInFile = int(binary.BigEndian.Uint32(buf[5:9]))
+		msg.pieceFileOffset = int(binary.BigEndian.Uint32(buf[5:9]))
 	}
 
 	// TODO: why not 4?
-	msg.endIdxInMsg = lenWithoutPrefix + 3
+	msg.endIdxInPacket = lenWithoutPrefix + 3
 
-	if msg.endIdxInMsg > len(buf) {
-		panic(fmt.Sprintf("Out of bounds of msg buffer: %v / %v", msg.endIdxInMsg, len(buf)))
+	if msg.endIdxInPacket > len(buf) {
+		panic(fmt.Sprintf("Out of bounds of msg buffer: %v / %v", msg.endIdxInPacket, len(buf)))
 	}
 
 	switch msg.kind {
 	case bitfield:
-		msg.bitfield = buf[5:msg.endIdxInMsg]
+		msg.bitfield = buf[5:msg.endIdxInPacket]
 	case request:
 		msg.blockOffset = int(binary.BigEndian.Uint32(buf[9:13]))
-		msg.blockLen = int(binary.BigEndian.Uint32(buf[13:msg.endIdxInMsg]))
+		msg.blockLen = int(binary.BigEndian.Uint32(buf[13:msg.endIdxInPacket]))
 	case piece:
 		msg.blockOffset = int(binary.BigEndian.Uint32(buf[9:13]))
-		msg.blockData = buf[13:msg.endIdxInMsg]
+		msg.blockData = buf[13:msg.endIdxInPacket]
 	}
 
 	return
@@ -456,7 +478,7 @@ func parseHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
 	fmt.Println("Peer has id", string(peerId))
 
 	msg.kind = handshake
-	msg.endIdxInMsg = protocolLen + 49
+	msg.endIdxInPacket = protocolLen + 49
 	return msg, nil
 }
 
@@ -471,9 +493,9 @@ func getNextFreePort() string {
 	return "6881"
 }
 
-func sendTrackerMessage(t torrent, peerId, portForTrackerResponse, trackerHostname, event string) (map[string]any, error) {
+func sendTrackerMessage(t torrent, peerId, portForTrackerResponse, event string) (map[string]any, error) {
 	reqURL := url.URL{
-		Opaque: trackerHostname,
+		Opaque: t.trackerHostname,
 	}
 	queryParams := url.Values{}
 	queryParams.Set("peer_id", peerId)

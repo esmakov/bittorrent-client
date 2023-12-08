@@ -1,3 +1,4 @@
+// Contains functionality related to parsing tokens and taking substrings from the metainfo file.
 package parser
 
 import (
@@ -56,6 +57,7 @@ type parser struct {
 	fileIdx               int
 	infoDictStartIdx      int
 	infoDictEndIdx        int
+	piecesStartIdx        int
 	indentLevel           int
 	shouldExpectDictKey   bool
 	unclosedCompoundTypes stack.Stack[btToken]
@@ -74,43 +76,66 @@ func New(shouldPrettyPrint bool) parser {
 /*
 NOTE: Assumes that the provided file is a correctly-formatted metainfo file.
 */
-func (p *parser) ParseMetaInfoFile(file string) (map[string]any, []byte, error) {
+func (p *parser) ParseMetaInfoFile(file string) (topLevelDict map[string]any, infoHash []byte, e error) {
 	fd, err := os.Open(file)
 	if err != nil {
-		return nil, nil, err
+		e = err
+		return
 	}
 	defer fd.Close()
 
 	if err := p.bDecode(fd); err != nil {
-		return nil, nil, err
+		e = err
+		return
 	}
 
 	// Extract info hash verbatim
 	fileBytes, err := os.ReadFile(file)
 	if err != nil {
-		return nil, nil, err
+		e = err
+		return
 	}
 
 	if p.infoDictStartIdx == 0 || p.infoDictEndIdx == 0 {
-		return nil, nil, errors.New("Didn't find info dict start or end")
+		e = errors.New("Didn't find info dict start or end")
+		return
 	}
 	if p.infoDictEndIdx > len(fileBytes) {
-		return nil, nil, errors.New("Tried to take a substring out of range of the file")
+		e = errors.New("Tried to take a substring out of range of the file")
+		return
 	}
 
 	infoDictBytes := fileBytes[p.infoDictStartIdx : p.infoDictEndIdx+1]
-	infoHash, err := hash.HashSHA1(infoDictBytes)
+	infoHash, err = hash.HashSHA1(infoDictBytes)
 	if err != nil {
-		return nil, nil, err
+		e = err
+		return
 	}
 
 	// Skip start of dict
 	if _, err := p.consumeToken(); err != nil {
-		return nil, nil, err
+		e = err
+		return
 	}
 
-	topLevelDict := p.parseDict()
-	return topLevelDict, infoHash, nil
+	topLevelDict = p.parseDict()
+	return
+}
+
+func (p parser) MapPieceIndicesToHashes(concatPieceHashes string) (map[int]string, error) {
+	if p.piecesStartIdx == 0 {
+		return nil, errors.New("Could not populate starting index of 'pieces' string")
+	}
+
+	m := make(map[int]string)
+
+	for i := 0; i < len(concatPieceHashes); {
+		hash := concatPieceHashes[i : i+20]
+		m[i+p.piecesStartIdx] = hash
+		i += 20
+	}
+
+	return m, nil
 }
 
 // While scanning, builds up the token list and populates indices around "info" dictionary
@@ -221,6 +246,7 @@ func (p parser) prettyPrint(t btToken) {
 	if !p.shouldPrettyPrint {
 		return
 	}
+
 	for i := p.indentLevel; i > 0; i-- {
 		fmt.Print("\t")
 	}
@@ -347,6 +373,10 @@ func (p *parser) splitFunc(data []byte, atEOF bool) (bytesToAdvance int, token [
 
 				token = data[tokenStartIdx:bytesToAdvance]
 				lexeme := string(token)
+
+				if lexeme == "pieces" {
+					p.piecesStartIdx = tokenStartIdx
+				}
 
 				// Assume not in a dict
 				t := btToken{btStr, lexeme, lexeme}
