@@ -44,14 +44,50 @@ func newTorrent(metaInfoFileName string, metaInfoMap map[string]any, infoHash []
 	infoMap := metaInfoMap["info"].(map[string]any)
 
 	// Optional common fields
-	var comment string
+	comment := ""
 	if commentEntry, ok := metaInfoMap["comment"]; ok {
 		comment = commentEntry.(string)
 	}
 
-	var isPrivate int
+	isPrivate := 0
 	if isPrivateEntry, ok := infoMap["private"]; ok {
 		isPrivate = isPrivateEntry.(int)
+	}
+
+	fileMode := ""
+	files := infoMap["files"]
+	if files != nil {
+		fileMode = "multiple"
+	} else {
+		fileMode = "single"
+	}
+
+	totalSize := 0
+	fileNum := 1
+
+	if fileMode == "multiple" {
+		files := files.([]any)
+		fileNum = len(files)
+
+		for _, v := range files {
+			fileDict := v.(map[string]any)
+
+			length := fileDict["length"].(int)
+			totalSize += length
+
+			pl := fileDict["path"].([]any)
+			var pathList []string
+			for _, v := range pl {
+				pathList = append(pathList, v.(string))
+			}
+			// TODO: Concatenate all files together and then extract piece hashes
+			// fmt.Println(strings.Join(pathList, "/"), length, "bytes")
+		}
+	} else if fileMode == "single" {
+		name := infoMap["name"].(string)
+		_ = name
+		length := infoMap["length"].(int)
+		totalSize += length
 	}
 
 	return &torrent{
@@ -59,9 +95,11 @@ func newTorrent(metaInfoFileName string, metaInfoMap map[string]any, infoHash []
 		trackerHostname:  trackerHostname,
 		comment:          comment,
 		infoHash:         infoHash,
-		files:            1,
+		files:            fileNum,
 		pieceHashes:      pieceHashes,
 		isPrivate:        isPrivate != 0,
+		totalSize:        totalSize,
+		left:             totalSize,
 	}
 }
 
@@ -82,67 +120,61 @@ func (t torrent) String() string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("USAGE: bittorrent-client [*.torrent]")
+		fmt.Println("USAGE: bittorrent-client add [*.torrent]")
 		os.Exit(1)
 	}
 
-	shouldPrettyPrint := flag.Bool("print", false, "Pretty print the metainfo file parse tree")
-	flag.Parse()
+	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
+	shouldPrettyPrint := addCmd.Bool("print", false, "Pretty print the metainfo file parse tree")
 
-	p := parser.New(*shouldPrettyPrint)
+	switch os.Args[1] {
+	case "add":
+		if len(os.Args) < 3 {
+			fmt.Println("USAGE: add [.torrent]")
+			return
+		}
+		metaInfoFileName := os.Args[2]
+		if err := addCmd.Parse(os.Args[3:]); err != nil {
+			fmt.Println(err)
+			return
+		}
+		if err := addTorrent(metaInfoFileName, *shouldPrettyPrint); err != nil {
+			fmt.Println(err)
+			return
+		}
+		// Return to background
+	default:
+		fmt.Println("USAGE: No such subcommand")
+		os.Exit(1)
+	}
+	return
+}
 
-	metaInfoFileName := flag.Args()[0]
-	topLevelMap, infoHash, err := p.ParseMetaInfoFile(metaInfoFileName)
+func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) error {
+	p := parser.New(shouldPrettyPrint)
+
+	fd, err := os.Open(metaInfoFileName)
 	if err != nil {
-		log.Println(err)
+		return err
+	}
+	defer fd.Close()
+
+	topLevelMap, infoHash, err := p.ParseMetaInfoFile(fd)
+	if err != nil {
+		return err
 	}
 
 	infoMap := topLevelMap["info"].(map[string]any)
 	pieceLength := infoMap["piece length"].(int)
 	_ = pieceLength
-	concatPieceHashes := infoMap["pieces"].(string)
+	piecesStr := infoMap["pieces"].(string)
 
-	pieceHashes, err := p.MapPieceIndicesToHashes(concatPieceHashes)
+	pieceHashes, err := p.MapPieceIndicesToHashes(piecesStr)
 	if err != nil {
-		log.Println(err)
+		return err
 	}
 
 	t := newTorrent(metaInfoFileName, topLevelMap, infoHash, pieceHashes)
-
-	var fileMode string
-	files := infoMap["files"]
-	if files != nil {
-		fileMode = "multiple"
-	} else {
-		fileMode = "single"
-	}
-
-	if fileMode == "multiple" {
-		files := files.([]any)
-		t.files = len(files)
-
-		for _, v := range files {
-			fileDict := v.(map[string]any)
-
-			length := fileDict["length"].(int)
-			t.totalSize += length
-
-			pl := fileDict["path"].([]any)
-			var pathList []string
-			for _, v := range pl {
-				pathList = append(pathList, v.(string))
-			}
-			// TODO: Concatenate all files together and then extract piece hashes
-			// fmt.Println(strings.Join(pathList, "/"), length, "bytes")
-		}
-	} else if fileMode == "single" {
-		name := infoMap["name"].(string)
-		_ = name
-		length := infoMap["length"].(int)
-		t.totalSize += length
-	}
-
-	t.left = t.totalSize
 	fmt.Println(t)
 
 	myPeerId, myPeerIdBytes := getPeerId()
@@ -151,7 +183,7 @@ func main() {
 
 	trackerResponse, err := sendTrackerMessage(*t, myPeerId, portForTrackerResponse, event)
 	if err != nil {
-		log.Println(err)
+		return err
 	}
 
 	if warning, ok := trackerResponse["warning message"]; ok {
@@ -178,12 +210,11 @@ func main() {
 	peersStr := trackerResponse["peers"].(string)
 	peerList, err := extractCompactPeers(peersStr)
 	if err != nil {
-		log.Println(err)
+		return err
 	}
 
 	if len(peerList) == 0 {
 		// TODO: Keep intermittently checking for peers in a separate goroutine
-		log.Println("No peers for torrent:", metaInfoFileName)
 	}
 
 	handshakeMsg := createHandshakeMsg(infoHash, myPeerIdBytes)
@@ -200,11 +231,13 @@ func main() {
 	//		Need to be able to close connection and continue seeking again (optimistic unchoking)
 	//		As piece messages come in, mutate our shared state (pieces we have), but how to avoid data races? Mutex?
 
-	for _, peer := range peerList {
-		if err := establishPeerConnection(handshakeMsg, t.infoHash, peer); err != nil {
-			log.Println(err)
-		}
-	}
+	// for _, peer := range peerList {
+	// 	if err := establishPeerConnection(handshakeMsg, t.infoHash, peer); err != nil {
+	// 		log.Println(err)
+	// 	}
+	// }
+
+	return nil
 }
 
 type connState struct {
@@ -273,18 +306,18 @@ func (m messageKinds) String() string {
 }
 
 type peerMessage struct {
-	kind            messageKinds
-	endIdxInPacket  int
-	pieceFileOffset int
-	bitfield        []byte
-	blockOffset     int
-	blockLen        int
-	blockData       []byte
+	kind           messageKinds
+	endIdxInPacket int
+	pieceIdxInFile int
+	bitfield       []byte
+	blockOffset    int
+	blockLen       int
+	blockData      []byte
 }
 
 type pieceData struct {
-	data       []byte
-	fileOffset int
+	data      []byte
+	idxInFile int
 }
 
 func (p pieceData) isValidPiece(pieceHashes map[int]string) (bool, error) {
@@ -295,7 +328,7 @@ func (p pieceData) isValidPiece(pieceHashes map[int]string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return string(givenHash) == pieceHashes[p.fileOffset], nil
+	return string(givenHash) == pieceHashes[p.idxInFile], nil
 }
 
 // TODO: Check if peer_id is as expected (if dictionary model)
@@ -438,7 +471,7 @@ func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
 	}
 
 	if msg.kind == have || msg.kind == request || msg.kind == piece || msg.kind == cancel {
-		msg.pieceFileOffset = int(binary.BigEndian.Uint32(buf[5:9]))
+		msg.pieceIdxInFile = int(binary.BigEndian.Uint32(buf[5:9]))
 	}
 
 	// TODO: why not 4?

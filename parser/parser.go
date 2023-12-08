@@ -3,6 +3,7 @@ package parser
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -76,26 +77,19 @@ func New(shouldPrettyPrint bool) parser {
 /*
 NOTE: Assumes that the provided file is a correctly-formatted metainfo file.
 */
-func (p *parser) ParseMetaInfoFile(file string) (topLevelDict map[string]any, infoHash []byte, e error) {
-	fd, err := os.Open(file)
+func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, infoHash []byte, e error) {
+	fileBytes, err := io.ReadAll(fd)
 	if err != nil {
 		e = err
 		return
 	}
-	defer fd.Close()
 
-	if err := p.bDecode(fd); err != nil {
+	if err := p.bDecode(bytes.NewReader(fileBytes)); err != nil {
 		e = err
 		return
 	}
 
 	// Extract info hash verbatim
-	fileBytes, err := os.ReadFile(file)
-	if err != nil {
-		e = err
-		return
-	}
-
 	if p.infoDictStartIdx == 0 || p.infoDictEndIdx == 0 {
 		e = errors.New("Didn't find info dict start or end")
 		return
