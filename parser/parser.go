@@ -116,6 +116,7 @@ func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, in
 	return
 }
 
+// Must run after ParseMetaInfoFile is called on the parser
 func (p parser) MapPieceIndicesToHashes(concatPieceHashes string) (map[int]string, error) {
 	if p.piecesStartIdx == 0 {
 		return nil, errors.New("Could not populate starting index of 'pieces' string")

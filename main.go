@@ -19,104 +19,8 @@ import (
 
 	"github.com/esmakov/bittorrent-client/hash"
 	"github.com/esmakov/bittorrent-client/parser"
+	"github.com/esmakov/bittorrent-client/torrent"
 )
-
-type torrent struct {
-	metaInfoFileName string
-	trackerHostname  string
-	infoHash         []byte
-	totalSize        int
-	pieceHashes      map[int]string
-	files            int
-	comment          string
-	left             int
-	downloaded       int
-	uploaded         int
-	trackerId        string
-	seeders          int
-	leechers         int
-	isPrivate        bool
-}
-
-func newTorrent(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte, pieceHashes map[int]string) *torrent {
-	// Fields common to single-file and multi-file torrents
-	trackerHostname := metaInfoMap["announce"].(string)
-	infoMap := metaInfoMap["info"].(map[string]any)
-
-	// Optional common fields
-	comment := ""
-	if commentEntry, ok := metaInfoMap["comment"]; ok {
-		comment = commentEntry.(string)
-	}
-
-	isPrivate := 0
-	if isPrivateEntry, ok := infoMap["private"]; ok {
-		isPrivate = isPrivateEntry.(int)
-	}
-
-	fileMode := ""
-	files := infoMap["files"]
-	if files != nil {
-		fileMode = "multiple"
-	} else {
-		fileMode = "single"
-	}
-
-	totalSize := 0
-	fileNum := 1
-
-	if fileMode == "multiple" {
-		files := files.([]any)
-		fileNum = len(files)
-
-		for _, v := range files {
-			fileDict := v.(map[string]any)
-
-			length := fileDict["length"].(int)
-			totalSize += length
-
-			pl := fileDict["path"].([]any)
-			var pathList []string
-			for _, v := range pl {
-				pathList = append(pathList, v.(string))
-			}
-			// TODO: Concatenate all files together and then extract piece hashes
-			// fmt.Println(strings.Join(pathList, "/"), length, "bytes")
-		}
-	} else if fileMode == "single" {
-		name := infoMap["name"].(string)
-		_ = name
-		length := infoMap["length"].(int)
-		totalSize += length
-	}
-
-	return &torrent{
-		metaInfoFileName: metaInfoFileName,
-		trackerHostname:  trackerHostname,
-		comment:          comment,
-		infoHash:         infoHash,
-		files:            fileNum,
-		pieceHashes:      pieceHashes,
-		isPrivate:        isPrivate != 0,
-		totalSize:        totalSize,
-		left:             totalSize,
-	}
-}
-
-func (t torrent) String() string {
-	str := fmt.Sprintln(
-		fmt.Sprintln("-------------Torrent Info---------------"),
-		fmt.Sprintln("File path:", t.metaInfoFileName),
-		fmt.Sprintln("Tracker:", t.trackerHostname),
-		fmt.Sprintf("Hash: % x\n", t.infoHash),
-		fmt.Sprintf("Total size: %v\n", t.totalSize),
-		fmt.Sprintf("# of files: %v\n", t.files))
-
-	if t.comment != "" {
-		str += fmt.Sprintln("Comment:", t.comment)
-	}
-	return str
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -145,20 +49,19 @@ func main() {
 		// Return to background
 	default:
 		fmt.Println("USAGE: No such subcommand")
-		os.Exit(1)
+		return
 	}
 	return
 }
 
 func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) error {
-	p := parser.New(shouldPrettyPrint)
-
 	fd, err := os.Open(metaInfoFileName)
 	if err != nil {
 		return err
 	}
 	defer fd.Close()
 
+	p := parser.New(shouldPrettyPrint)
 	topLevelMap, infoHash, err := p.ParseMetaInfoFile(fd)
 	if err != nil {
 		return err
@@ -174,14 +77,14 @@ func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) error {
 		return err
 	}
 
-	t := newTorrent(metaInfoFileName, topLevelMap, infoHash, pieceHashes)
+	t := torrent.New(metaInfoFileName, topLevelMap, infoHash, pieceHashes)
 	fmt.Println(t)
 
 	myPeerId, myPeerIdBytes := getPeerId()
 	portForTrackerResponse := getNextFreePort()
 	event := "started" // TODO: Enum
 
-	trackerResponse, err := sendTrackerMessage(*t, myPeerId, portForTrackerResponse, event)
+	trackerResponse, err := sendTrackerMessage(t, myPeerId, portForTrackerResponse, event)
 	if err != nil {
 		return err
 	}
@@ -195,15 +98,15 @@ func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) error {
 
 	// Optional tracker fields
 	if trackerId, ok := trackerResponse["tracker id"]; ok {
-		t.trackerId = trackerId.(string)
+		t.TrackerId = trackerId.(string)
 	}
 
 	if numSeeders, ok := trackerResponse["complete"]; ok {
-		t.seeders = numSeeders.(int)
+		t.SetSeedersSafely(numSeeders.(int))
 	}
 
 	if numLeechers, ok := trackerResponse["incomplete"]; ok {
-		t.leechers = numLeechers.(int)
+		t.SetLeechersSafely(numLeechers.(int))
 	}
 
 	// TODO: Handle dictionary model of peer list
@@ -231,13 +134,137 @@ func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) error {
 	//		Need to be able to close connection and continue seeking again (optimistic unchoking)
 	//		As piece messages come in, mutate our shared state (pieces we have), but how to avoid data races? Mutex?
 
-	// for _, peer := range peerList {
-	// 	if err := establishPeerConnection(handshakeMsg, t.infoHash, peer); err != nil {
-	// 		log.Println(err)
-	// 	}
-	// }
+	for _, peer := range peerList {
+		if err := establishPeerConnection(handshakeMsg, t.InfoHash, peer); err != nil {
+			log.Println(err)
+		}
+	}
 
 	return nil
+}
+
+func getPeerId() (string, []byte) {
+	peerId := "edededededededededed"
+	peerIdBytes := make([]byte, len(peerId))
+	copy(peerIdBytes, peerId)
+	return peerId, peerIdBytes
+}
+
+func getNextFreePort() string {
+	return "6881"
+}
+
+// handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
+func createHandshakeMsg(infoHash []byte, peerId []byte) []byte {
+	pstr := "BitTorrent protocol"
+	pstrBytes := make([]byte, len(pstr))
+	copy(pstrBytes, pstr)
+
+	pstrLenByte := []byte{byte(len(pstr))}
+	reserved := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+
+	return concatMultipleSlices([][]byte{pstrLenByte, pstrBytes, reserved, infoHash, peerId})
+}
+
+// Credit: https://freshman.tech/snippets/go/concatenate-slices/#concatenating-multiple-slices-at-once
+func concatMultipleSlices[T any](slices [][]T) []T {
+	var totalLen int
+
+	for _, s := range slices {
+		totalLen += len(s)
+	}
+
+	result := make([]T, totalLen)
+
+	var i int
+
+	for _, s := range slices {
+		i += copy(result[i:], s)
+	}
+
+	return result
+}
+
+func sendTrackerMessage(t *torrent.Torrent, peerId, portForTrackerResponse, event string) (map[string]any, error) {
+	reqURL := url.URL{
+		Opaque: t.TrackerHostname,
+	}
+	queryParams := url.Values{}
+	queryParams.Set("peer_id", peerId)
+	queryParams.Set("port", portForTrackerResponse)
+	queryParams.Set("uploaded", strconv.Itoa(t.GetUploadedSafely()))
+	queryParams.Set("downloaded", strconv.Itoa(t.GetDownloadedSafely()))
+	queryParams.Set("left", strconv.Itoa(t.GetLeftSafely()))
+	queryParams.Set("event", event)
+	queryParams.Set("compact", "1")
+	if t.TrackerId != "" {
+		queryParams.Set("trackerid", t.TrackerId)
+	}
+	reqURL.RawQuery = "info_hash=" + hash.CustomURLEscape(t.InfoHash) + "&" + queryParams.Encode()
+
+	req, err := http.NewRequest("GET", reqURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Close = true
+	req.Header.Set("Connection", "close")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	p := parser.New(false)
+	response, err := p.ParseResponse(bufio.NewReader(bytes.NewReader(body)))
+	if err != nil {
+		return nil, err
+	}
+
+	if failureReason, ok := response["failure reason"]; ok {
+		return nil, errors.New("TRACKER FAILURE REASON: " + failureReason.(string))
+	}
+
+	return response, nil
+}
+
+func extractCompactPeers(s string) ([]string, error) {
+	var list []string
+
+	if len(s)%6 != 0 {
+		return nil, errors.New("Peer information must be a multiple of 6 bytes")
+	}
+
+	for i := 0; i < len(s)-2; {
+		ip := ""
+		for j := 0; j < 4; j++ {
+			ip += fmt.Sprintf("%d", s[i])
+			if j != 3 {
+				ip += "."
+			}
+			i++
+		}
+		ip += ":"
+
+		var portVal uint16
+		portBytes := []byte(s[i : i+2])
+		portVal = binary.BigEndian.Uint16(portBytes)
+		ip += strconv.Itoa(int(portVal))
+
+		// Skip 2 bytes for the port
+		i += 2
+
+		list = append(list, ip)
+	}
+
+	return list, nil
 }
 
 type connState struct {
@@ -332,7 +359,7 @@ func (p pieceData) isValidPiece(pieceHashes map[int]string) (bool, error) {
 }
 
 // TODO: Check if peer_id is as expected (if dictionary model)
-func establishPeerConnection(handshakeMsg, expectedInfoHash []byte, peerAddr string) error {
+func establishPeerConnection(myHandshakeMsg, expectedInfoHash []byte, peerAddr string) error {
 	conn, err := net.DialTimeout("tcp", peerAddr, time.Millisecond*500)
 	if err != nil {
 		return err
@@ -341,7 +368,7 @@ func establishPeerConnection(handshakeMsg, expectedInfoHash []byte, peerAddr str
 
 	log.Println("Connected to peer", peerAddr)
 
-	if _, err := conn.Write(handshakeMsg); err != nil {
+	if _, err := conn.Write(myHandshakeMsg); err != nil {
 		return err
 	}
 
@@ -513,128 +540,4 @@ func parseHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
 	msg.kind = handshake
 	msg.endIdxInPacket = protocolLen + 49
 	return msg, nil
-}
-
-func getPeerId() (string, []byte) {
-	peerId := "edededededededededed"
-	peerIdBytes := make([]byte, len(peerId))
-	copy(peerIdBytes, peerId)
-	return peerId, peerIdBytes
-}
-
-func getNextFreePort() string {
-	return "6881"
-}
-
-func sendTrackerMessage(t torrent, peerId, portForTrackerResponse, event string) (map[string]any, error) {
-	reqURL := url.URL{
-		Opaque: t.trackerHostname,
-	}
-	queryParams := url.Values{}
-	queryParams.Set("peer_id", peerId)
-	queryParams.Set("port", portForTrackerResponse)
-	queryParams.Set("uploaded", strconv.Itoa(t.uploaded))
-	queryParams.Set("downloaded", strconv.Itoa(t.downloaded))
-	queryParams.Set("left", strconv.Itoa(t.left))
-	queryParams.Set("event", event)
-	queryParams.Set("compact", "1")
-	if t.trackerId != "" {
-		queryParams.Set("trackerid", t.trackerId)
-	}
-	reqURL.RawQuery = "info_hash=" + hash.CustomURLEscape(t.infoHash) + "&" + queryParams.Encode()
-
-	req, err := http.NewRequest("GET", reqURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Close = true
-	req.Header.Set("Connection", "close")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	p := parser.New(false)
-	response, err := p.ParseResponse(bufio.NewReader(bytes.NewReader(body)))
-	if err != nil {
-		return nil, err
-	}
-
-	if failureReason, ok := response["failure reason"]; ok {
-		return nil, errors.New("TRACKER FAILURE REASON: " + failureReason.(string))
-	}
-
-	return response, nil
-}
-
-func extractCompactPeers(s string) ([]string, error) {
-	var list []string
-
-	if len(s)%6 != 0 {
-		return nil, errors.New("Peer information must be a multiple of 6 bytes")
-	}
-
-	for i := 0; i < len(s)-2; {
-		ip := ""
-		for j := 0; j < 4; j++ {
-			ip += fmt.Sprintf("%d", s[i])
-			if j != 3 {
-				ip += "."
-			}
-			i++
-		}
-		ip += ":"
-
-		var portVal uint16
-		portBytes := []byte(s[i : i+2])
-		portVal = binary.BigEndian.Uint16(portBytes)
-		ip += strconv.Itoa(int(portVal))
-
-		// Skip 2 bytes for the port
-		i += 2
-
-		list = append(list, ip)
-	}
-
-	return list, nil
-}
-
-// handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
-func createHandshakeMsg(infoHash []byte, peerId []byte) []byte {
-	pstr := "BitTorrent protocol"
-	pstrBytes := make([]byte, len(pstr))
-	copy(pstrBytes, pstr)
-
-	pstrLenByte := []byte{byte(len(pstr))}
-	reserved := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-
-	return concatMultipleSlices([][]byte{pstrLenByte, pstrBytes, reserved, infoHash, peerId})
-}
-
-// Credit: https://freshman.tech/snippets/go/concatenate-slices/#concatenating-multiple-slices-at-once
-func concatMultipleSlices[T any](slices [][]T) []T {
-	var totalLen int
-
-	for _, s := range slices {
-		totalLen += len(s)
-	}
-
-	result := make([]T, totalLen)
-
-	var i int
-
-	for _, s := range slices {
-		i += copy(result[i:], s)
-	}
-
-	return result
 }
