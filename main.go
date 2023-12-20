@@ -35,6 +35,7 @@ func main() {
 			fmt.Println(err)
 			return
 		}
+
 		fmt.Println(t)
 
 		if err := t.Start(); err != nil {
@@ -73,5 +74,6 @@ func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torre
 	}
 
 	t := torrent.New(metaInfoFileName, topLevelMap, infoHash, pieceHashes)
+
 	return t, nil
 }
