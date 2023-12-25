@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,18 +21,16 @@ import (
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
-const MAX_PEERS = 5
-
 type Torrent struct {
-	trackerHostname  string
-	infoHash         []byte
-	trackerId        string
 	metaInfoFileName string
-	totalSize        int
-	files            int
+	trackerHostname  string
 	comment          string
+	trackerId        string
+	infoHash         []byte
 	isPrivate        bool
 	pieceHashes      map[int]string
+	files            int
+	totalSize        int
 	downloaded       int
 	uploaded         int
 	left             int
@@ -106,7 +105,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte, p
 }
 
 func (t *Torrent) String() string {
-	str := fmt.Sprintln(
+	str := fmt.Sprint(
 		fmt.Sprintln("-------------Torrent Info---------------"),
 		fmt.Sprintln("File path:", t.metaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
@@ -115,17 +114,46 @@ func (t *Torrent) String() string {
 		fmt.Sprintln("# of files: ", t.files))
 
 	if t.comment != "" {
-		str += fmt.Sprintln("Comment:", t.comment)
+		str += fmt.Sprint("Comment:", t.comment)
 	}
+	str += "\n"
 	return str
 }
+
+const MAX_PEERS = 5
+
+/*
+One goroutine has to listen for incoming connections on the port we announced to tracker
+
+Another goroutine has to keep talking to the tracker
+
+While # of connections <= MAX_PEERS, go through list of peers and attempt to establish a conn
+Spawn a goroutine for each connection that has to:
+As piece messages come in, store data block in memory
+As pieces complete:
+Check hash and die if incorrect, also blacklist peer
+Signal main goroutine to update torrent state
+Save piece to disk
+
+Want to write each piece to disk as it completes, but:
+- pieces may be out of order
+- pieces may cross file boundaries
+- can't store all pieces in memory at same time
+One strategy:
+- preallocate enough disk space for entire torrent
+- as each piece comes in, do buffered writes to its offset in the file
+
+Either each goroutine needs (synchronized) access to the torrent state (which is simpler), or
+There needs to be a main goroutine sending each "connection handler" goroutine updates about
+which pieces are downloaded
+*/
 
 func (t *Torrent) Start() error {
 	myPeerId, myPeerIdBytes := getPeerId()
 	portForTrackerResponse := getNextFreePort()
 	event := "started" // TODO: Enum
 
-	trackerResponse, err := t.sendTrackerMessage(myPeerId, portForTrackerResponse, event)
+	trackerResponse, err := sendTrackerMessage(t, myPeerId, portForTrackerResponse, event)
 	if err != nil {
 		return err
 	}
@@ -160,34 +188,6 @@ func (t *Torrent) Start() error {
 		// TODO: Keep intermittently checking for peers in a separate goroutine
 	}
 
-	handshakeMsg := createHandshakeMsg(t.infoHash, myPeerIdBytes)
-	_ = handshakeMsg
-
-	/*
-		One goroutine has to listen for incoming connections on the port we announced to tracker
-
-		Another goroutine has to keep talking to the tracker
-
-		While # of connections <= MAX_PEERS, go through list of peers and attempt to establish a conn
-			Spawn a goroutine for each connection that has to:
-				As piece messages come in, store data block in memory
-				As pieces complete:
-					Check hash and die if incorrect, also blacklist peer
-					Signal main goroutine to update torrent state
-					Save piece to disk
-
-				Want to write each piece to disk as it completes, but:
-				- pieces may be out of order
-				- pieces may cross file boundaries
-				- can't store all pieces in memory at same time
-				One strategy:
-				- preallocate enough disk space for entire torrent
-				- as each piece comes in, do buffered writes to its offset in the file
-
-		Either each goroutine needs (synchronized) access to the torrent state (which is simpler), or
-			There needs to be a main goroutine sending each "connection handler" goroutine updates about
-			which pieces are downloaded
-	*/
 	errors := make(chan error, 5)
 	done := make(chan struct{}, 5)
 
@@ -196,11 +196,11 @@ func (t *Torrent) Start() error {
 
 	for numPeers < MAX_PEERS {
 		peer := peerList[lastPickedPeerIdx]
-		go func() {
-			establishPeerConnection(handshakeMsg, t.infoHash, peer, errors, done)
-		}()
+		go establishPeerConnection(t.infoHash, myPeerIdBytes, peer, errors, done)
+
 		numPeers++
 		lastPickedPeerIdx++
+
 		if lastPickedPeerIdx == len(peerList) {
 			lastPickedPeerIdx = 0
 		}
@@ -230,16 +230,16 @@ func getNextFreePort() string {
 	return "6881"
 }
 
-// handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
+// <pstrlen><pstr><reserved><info_hash><peer_id>
 func createHandshakeMsg(infoHash []byte, peerId []byte) []byte {
-	pstr := "BitTorrent protocol"
-	pstrBytes := make([]byte, len(pstr))
-	copy(pstrBytes, pstr)
+	protocol := "BitTorrent protocol"
+	protocolBytes := make([]byte, len(protocol))
+	copy(protocolBytes, protocol)
 
-	pstrLenByte := []byte{byte(len(pstr))}
+	length := []byte{byte(len(protocol))}
 	reserved := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 
-	return concatMultipleSlices([][]byte{pstrLenByte, pstrBytes, reserved, infoHash, peerId})
+	return concatMultipleSlices([][]byte{length, protocolBytes, reserved, infoHash, peerId})
 }
 
 // Credit: https://freshman.tech/snippets/go/concatenate-slices/#concatenating-multiple-slices-at-once
@@ -261,7 +261,7 @@ func concatMultipleSlices[T any](slices [][]T) []T {
 	return result
 }
 
-func (t *Torrent) sendTrackerMessage(peerId, portForTrackerResponse, event string) (map[string]any, error) {
+func sendTrackerMessage(t *Torrent, peerId, portForTrackerResponse, event string) (map[string]any, error) {
 	reqURL := url.URL{
 		Opaque: t.trackerHostname,
 	}
@@ -343,47 +343,63 @@ func extractCompactPeers(s string) ([]string, error) {
 	return list, nil
 }
 
-func establishPeerConnection(myHandshakeMsg, expectedInfoHash []byte, peerAddr string, errors chan<- error, done chan<- struct{}) {
-	conn, err := net.DialTimeout("tcp", peerAddr, time.Millisecond*500)
+const BLOCK_SIZE = 16 * 1024
+
+func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr string, errors chan<- error, done chan<- struct{}) {
+	peerHost, _, err := net.SplitHostPort(peerAddr)
 	if err != nil {
-		e := fmt.Errorf("Error when talking to %v:\n %w", peerAddr, err)
+		e := fmt.Errorf("Error splitting host and port: %w", err)
+		errors <- e
+		return
+	}
+
+	fmt.Println("Connecting to peer", peerHost)
+
+	conn, err := net.DialTimeout("tcp", peerAddr, 5*time.Second)
+	if err != nil {
+		e := fmt.Errorf("Error establishing connection with %v:\n %w", peerAddr, err)
 		errors <- e
 		return
 	}
 	defer conn.Close()
 
-	fmt.Println("Connected to peer", peerAddr)
+	fmt.Println("Connected to peer", peerHost)
 
-	if _, err := conn.Write(myHandshakeMsg); err != nil {
+	handshakeMsg := createHandshakeMsg(expectedInfoHash, myPeerIdBytes)
+
+	if _, err := conn.Write(handshakeMsg); err != nil {
 		e := fmt.Errorf("Error when talking to %v:\n %w", peerAddr, err)
 		errors <- e
 		return
 	}
 
-	msgBuf := make([]byte, 512)
+	msgBuf := make([]byte, 32*1024)
 	connState := newConnState()
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(15 * time.Second)
 
 	for {
-		numRead, err := conn.Read(msgBuf) // I hope it only appends
+		numRead, err := conn.Read(msgBuf) // I hope it doesn't clear the buf
 		if err != nil {
-			e := fmt.Errorf("Error when talking to %v:\n %w", peerAddr, err)
+			e := fmt.Errorf("Error reading from %v:\n %w", peerHost, err)
 			errors <- e
 			return
 		}
 
-		fmt.Println("Got response of length:", numRead)
+		fmt.Printf("%v sent %v bytes\n", peerHost, numRead)
 
 		msgList, err := parseMultiMessage(msgBuf[:numRead], expectedInfoHash)
 		if err != nil {
-			e := fmt.Errorf("Error when talking to %v:\n %w", peerAddr, err)
+			e := fmt.Errorf("Error when talking to %v:\n %w", peerHost, err)
 			errors <- e
 			return
 		}
 
 		for _, msg := range msgList {
+			fmt.Printf("%v sent %v\n", peerHost, msg.kind)
 			switch msg.kind {
+			case handshake:
+				fmt.Printf("%v has peer id %v\n", peerHost, string(msg.peerId))
 			case choke:
 				connState.peer_choking = true
 			case unchoke:
@@ -392,16 +408,39 @@ func establishPeerConnection(myHandshakeMsg, expectedInfoHash []byte, peerAddr s
 				connState.peer_interested = true
 			case uninterested:
 				connState.peer_interested = false
+			case bitfield:
+				unchokeMsg := createUnchokeMessage()
+				fmt.Printf("Sending unchoke to %v\n", peerHost)
+				if _, err := conn.Write(unchokeMsg); err != nil {
+					e := fmt.Errorf("Error sending unchoke: %w", err)
+					errors <- e
+					return
+				}
+
+				chosenPieceIdx := uint32(randomNextPieceIdx(msg.bitfield))
+				offset := uint32(0)
+				length := uint32(BLOCK_SIZE)
+				reqMsg := createRequestMessage(chosenPieceIdx, offset, length)
+
+				fmt.Printf("Sending request for piece %v with block offset %v to %v\n", chosenPieceIdx, offset, peerHost)
+				if _, err := conn.Write(reqMsg); err != nil {
+					e := fmt.Errorf("Error requesting piece %v with block offset %v: %w", chosenPieceIdx, offset, err)
+					errors <- e
+					return
+				}
+			case piece:
+				fmt.Println("Received block:", msg.blockData)
 			}
 		}
 
-		// if last message was fragment:
-		// clear buffer only up to the start of fragment
+		// If last message was a fragment, leave in the buffer so we can attempt to parse it again
 		clearUpTo := len(msgBuf)
 
 		for i := 0; i < len(msgList)-1; i++ {
-			if msgList[i+1].kind == partial {
+			if msgList[i+1].kind == fragment {
 				clearUpTo = msgList[i].endIdxInPacket
+				fmt.Printf("Msg buf before clearing: % x\n", msgBuf[:numRead])
+				fmt.Println("Clearing up to:", clearUpTo)
 			}
 		}
 
@@ -409,13 +448,59 @@ func establishPeerConnection(myHandshakeMsg, expectedInfoHash []byte, peerAddr s
 			msgBuf[i] = 0
 		}
 
+		if clearUpTo != len(msgBuf) {
+			fmt.Printf("Cleared, msg buf now contains % x\n:", msgBuf[:100])
+		}
+
 		select {
 		case <-timeout:
 			done <- struct{}{}
 			return
 		}
-		// read bitfield and choose one of its pieces
-		// send request msg
+	}
+}
+
+func createUnchokeMessage() []byte {
+	return []byte{0x00, 0x00, 0x00, 0x01, 0x01}
+}
+
+func createRequestMessage(idx, offset, length uint32) []byte {
+	lengthAndID := []byte{
+		0x00,
+		0x00,
+		0x00,
+		0x0D, // length without prefix = 13
+		0x06, // message ID
+	}
+	bytes := make([]byte, 4+13)
+	copy(bytes, lengthAndID)
+
+	payload := []uint32{idx, offset, length}
+	for i, v := range payload {
+		index := i*4 + 5
+		binary.BigEndian.PutUint32(bytes[index:index+4], v)
+	}
+
+	return bytes
+}
+
+// TODO: Cross-reference against the bitfield representing pieces we already have
+func randomNextPieceIdx(bitfield []byte) int {
+	for {
+		randByteIdx := rand.Intn(len(bitfield))
+		randByte := bitfield[randByteIdx]
+		if randByte == 0 {
+			// No completed pieces here
+			continue
+		}
+		// From right to left, find first bit == 1
+		for bitIdx := 0; bitIdx < 8; bitIdx++ {
+			mask := byte(1 << bitIdx)
+			if randByte&mask == 1 {
+				// Get idx starting from left-hand side of bitfield
+				return randByteIdx + (7 - bitIdx)
+			}
+		}
 	}
 }
 
@@ -450,7 +535,7 @@ const (
 	port
 	keepalive
 	handshake
-	partial
+	fragment
 )
 
 func (m messageKinds) String() string {
@@ -485,13 +570,14 @@ func (m messageKinds) String() string {
 }
 
 type peerMessage struct {
-	kind                       messageKinds
-	endIdxInPacket             int
-	pieceHashIdxInMetaInfoFile int
-	bitfield                   []byte
-	blockOffset                int
-	blockLen                   int
-	blockData                  []byte
+	kind           messageKinds
+	endIdxInPacket int
+	peerId         []byte
+	pieceIdx       int
+	bitfield       []byte
+	blockOffset    int
+	blockLen       int
+	blockData      []byte
 }
 
 type pieceData struct {
@@ -510,15 +596,15 @@ func (p pieceData) isValidPiece(pieceHashes map[int]string) (bool, error) {
 	return string(givenHash) == pieceHashes[p.hashIdxInMetaInfoFile], nil
 }
 
-// Peers sometimes send multiple messages per packet
+// Sometimes multiple messages will be read from the stream at once
 func parseMultiMessage(buf, expectedInfoHash []byte) ([]peerMessage, error) {
 	var msgList []peerMessage
 	for i := 0; i < len(buf)-1; {
+		// Chop off one message at a time
 		msg, err := parseMessage(buf[i:], expectedInfoHash)
 		if err != nil {
 			return nil, err
 		}
-		fmt.Println(msg.kind)
 		msgList = append(msgList, msg)
 		i += msg.endIdxInPacket
 	}
@@ -526,13 +612,9 @@ func parseMultiMessage(buf, expectedInfoHash []byte) ([]peerMessage, error) {
 }
 
 func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
-	// If a peer supplies a handshake, validate it first
 	// TODO: More robust check for handshake presence
 	if int(buf[0]) == 19 {
 		msg, e = parseHandshake(buf, expectedInfoHash)
-		// if e != nil {
-		// 	return
-		// }
 		return
 	}
 
@@ -546,55 +628,21 @@ func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
 	lenVal := int(lenBytes)
 
 	if lenVal > len(buf) {
-		// Message needs to be reassembled from multiple TCP packets
-		msg.kind = partial
+		// Message needs to be reassembled from this packet and the next
+		msg.kind = fragment
 		msg.endIdxInPacket = len(buf)
+		fmt.Printf("Partial payload: % x\n", buf)
 		return
 	}
 
 	messageKind := int(buf[4])
-
-	var lenWithoutPrefix int
-
-	switch messageKinds(messageKind) {
-	case choke:
-		msg.kind = choke
-		lenWithoutPrefix = 1
-	case unchoke:
-		msg.kind = unchoke
-		lenWithoutPrefix = 1
-	case interested:
-		msg.kind = interested
-		lenWithoutPrefix = 1
-	case uninterested:
-		msg.kind = uninterested
-		lenWithoutPrefix = 1
-	case have:
-		msg.kind = have
-		lenWithoutPrefix = 5
-	case bitfield:
-		msg.kind = bitfield
-		lenWithoutPrefix = 1 + lenVal
-	case request:
-		msg.kind = request
-		lenWithoutPrefix = 13
-	case piece:
-		msg.kind = piece
-		lenWithoutPrefix = 9 + lenVal
-	case cancel:
-		msg.kind = cancel
-		lenWithoutPrefix = 13
-	case port:
-		msg.kind = port
-		lenWithoutPrefix = 3
-	}
+	msg.kind = messageKinds(messageKind)
 
 	if msg.kind == have || msg.kind == request || msg.kind == piece || msg.kind == cancel {
-		msg.pieceHashIdxInMetaInfoFile = int(binary.BigEndian.Uint32(buf[5:9]))
+		msg.pieceIdx = int(binary.BigEndian.Uint32(buf[5:9]))
 	}
 
-	// TODO: why not 4?
-	msg.endIdxInPacket = lenWithoutPrefix + 3
+	msg.endIdxInPacket = lenVal + 4 // Include 4-byte length prefix
 
 	if msg.endIdxInPacket > len(buf) {
 		panic(fmt.Sprintf("Out of bounds of msg buffer: %v / %v", msg.endIdxInPacket, len(buf)))
@@ -619,18 +667,18 @@ func parseHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
 	protocolLen := int(buf[0]) // Should be 19
 
 	// protocolBytes := buf[1 : protocolLen+1]
-	// fmt.Println(string(protocolBytes))
 	// reservedBytes := buf[protocolLen+1 : protocolLen+9]
 
 	theirInfoHash := buf[protocolLen+9 : protocolLen+29]
 	if !slices.Equal(theirInfoHash, expectedInfoHash) {
 		return msg, errors.New("Peer did not respond with correct info hash")
 	}
+
 	peerId := buf[protocolLen+29 : protocolLen+49]
-	fmt.Println("Peer has id", string(peerId))
 
 	msg.kind = handshake
 	msg.endIdxInPacket = protocolLen + 49
+	msg.peerId = peerId
 	return msg, nil
 }
 

@@ -114,7 +114,8 @@ func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, in
 	return
 }
 
-// NOTE: Must run after ParseMetaInfoFile is called on the parser
+// Maps each piece hash to its index in the metainfo (.torrent) file
+// NOTE: Must be called after ParseMetaInfoFile
 func (p parser) MapPieceIndicesToHashes(concatPieceHashes string) (map[int]string, error) {
 	if p.piecesStartIdx == 0 {
 		return nil, errors.New("Could not populate starting index of 'pieces' string")
