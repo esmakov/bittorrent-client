@@ -347,7 +347,7 @@ func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr st
 		return
 	}
 
-	fmt.Println("Connecting to peer", peerHost)
+	fmt.Println("Connecting to peer", peerHost, "...")
 
 	conn, err := net.DialTimeout("tcp", peerAddr, 1*time.Second)
 	if err != nil {
@@ -392,7 +392,7 @@ func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr st
 		} else {
 			fmt.Println("Appended to earlier fragment")
 			for i := 0; i < numRead; i++ {
-				msgBuf = append(msgBuf, tempBuf[i])
+				msgBuf[msgDataEndIdx+i] = tempBuf[i]
 			}
 		}
 
@@ -435,6 +435,9 @@ func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr st
 				}
 			case piece:
 				fmt.Println("Block data (truncated):", msg.blockData[:100])
+				// Update my bitfield
+				// Save block
+				// Update offset and request another block (update block selection to use our bitfield)
 			}
 		}
 
@@ -450,12 +453,18 @@ func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr st
 			msgBuf[i] = 0
 		}
 
-		if startOfFirstFragment == numRead {
+		if startOfFirstFragment == msgDataEndIdx {
 			// fmt.Println("No fragments, cleared entire buf")
 			msgDataEndIdx = 0
-		} else {
-			msgBuf = msgBuf[startOfFirstFragment:]
-			// fmt.Printf("Cleared and advanced, msg buf now should contain: (truncated) % x\n", msgBuf[:100])
+		} else if startOfFirstFragment != 0 {
+			// Copy data to start to eliminate leading 0s
+			dataLen := msgDataEndIdx - startOfFirstFragment
+			fmt.Printf("Copying over first %v bytes\n", startOfFirstFragment)
+			// for i := 0; i < dataLen; i++ {
+			// 	msgBuf[i] = msgBuf[startOfFirstFragment+i]
+			// }
+			copy(msgBuf, msgBuf[startOfFirstFragment:])
+			msgDataEndIdx = dataLen
 		}
 
 		fmt.Println()
@@ -636,7 +645,7 @@ func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
 		// Message needs to be reassembled from this packet and the next
 		msg.kind = fragment
 		msg.totalLen = len(buf)
-		fmt.Printf("Peer wanted to send %v bytes but we only got %v from this read\n", lenVal, len(buf))
+		fmt.Printf("Message is %v bytes long but we only have %v so far\n", lenVal, len(buf))
 		fmt.Println("Peer sent", msg.kind)
 		return
 	}
