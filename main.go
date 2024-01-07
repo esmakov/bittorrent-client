@@ -16,7 +16,7 @@ func main() {
 	}
 
 	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
-	shouldPrettyPrint := addCmd.Bool("print", false, "Pretty print the metainfo file parse tree")
+	printParseTree := addCmd.Bool("print", false, "Pretty print the metainfo file parse tree")
 
 	switch os.Args[1] {
 	case "add":
@@ -30,7 +30,7 @@ func main() {
 			return
 		}
 
-		t, err := addTorrent(metaInfoFileName, *shouldPrettyPrint)
+		t, err := addTorrent(metaInfoFileName, *printParseTree)
 		if err != nil {
 			fmt.Println(err)
 			return

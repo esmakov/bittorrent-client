@@ -120,8 +120,6 @@ func (t *Torrent) String() string {
 	return str
 }
 
-const MAX_PEERS = 5
-
 /*
 One goroutine has to listen for incoming connections on the port we announced to tracker
 
@@ -149,7 +147,10 @@ which pieces are downloaded
 */
 
 func (t *Torrent) Start() error {
+	const MAX_PEERS = 1
+
 	myPeerId, myPeerIdBytes := getPeerId()
+	_ = myPeerIdBytes
 	portForTrackerResponse := getNextFreePort()
 	event := "started" // TODO: Enum
 
@@ -192,18 +193,12 @@ func (t *Torrent) Start() error {
 	done := make(chan struct{}, 5)
 
 	numPeers := 0
-	lastPickedPeerIdx := 0
 
+	// TODO: Maintain N active peers
 	for numPeers < MAX_PEERS {
-		peer := peerList[lastPickedPeerIdx]
+		peer := peerList[rand.Intn(len(peerList))]
 		go establishPeerConnection(t.infoHash, myPeerIdBytes, peer, errors, done)
-
 		numPeers++
-		lastPickedPeerIdx++
-
-		if lastPickedPeerIdx == len(peerList) {
-			lastPickedPeerIdx = 0
-		}
 	}
 
 	for {
@@ -215,8 +210,7 @@ func (t *Torrent) Start() error {
 			fmt.Println("Completed")
 		}
 	}
-
-	return nil
+	// TODO: Run in background
 }
 
 func getPeerId() (string, []byte) {
@@ -268,9 +262,9 @@ func sendTrackerMessage(t *Torrent, peerId, portForTrackerResponse, event string
 	queryParams := url.Values{}
 	queryParams.Set("peer_id", peerId)
 	queryParams.Set("port", portForTrackerResponse)
-	queryParams.Set("uploaded", strconv.Itoa(t.LoadUploaded()))
-	queryParams.Set("downloaded", strconv.Itoa(t.LoadDownloaded()))
-	queryParams.Set("left", strconv.Itoa(t.LoadLeft()))
+	queryParams.Set("uploaded", strconv.Itoa(t.uploaded))
+	queryParams.Set("downloaded", strconv.Itoa(t.downloaded))
+	queryParams.Set("left", strconv.Itoa(t.left))
 	queryParams.Set("event", event)
 	queryParams.Set("compact", "1")
 	if t.trackerId != "" {
@@ -343,22 +337,21 @@ func extractCompactPeers(s string) ([]string, error) {
 	return list, nil
 }
 
-const BLOCK_SIZE = 16 * 1024
-
 func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr string, errors chan<- error, done chan<- struct{}) {
+	const BLOCK_SIZE = 16 * 1024
+	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13 // Piece message header
+
 	peerHost, _, err := net.SplitHostPort(peerAddr)
 	if err != nil {
-		e := fmt.Errorf("Error splitting host and port: %w", err)
-		errors <- e
+		errors <- err
 		return
 	}
 
 	fmt.Println("Connecting to peer", peerHost)
 
-	conn, err := net.DialTimeout("tcp", peerAddr, 5*time.Second)
+	conn, err := net.DialTimeout("tcp", peerAddr, 1*time.Second)
 	if err != nil {
-		e := fmt.Errorf("Error establishing connection with %v:\n %w", peerAddr, err)
-		errors <- e
+		errors <- err
 		return
 	}
 	defer conn.Close()
@@ -368,27 +361,42 @@ func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr st
 	handshakeMsg := createHandshakeMsg(expectedInfoHash, myPeerIdBytes)
 
 	if _, err := conn.Write(handshakeMsg); err != nil {
-		e := fmt.Errorf("Error when talking to %v:\n %w", peerAddr, err)
-		errors <- e
+		errors <- err
 		return
 	}
 
 	msgBuf := make([]byte, 32*1024)
+	msgDataEndIdx := 0
 	connState := newConnState()
 
-	timeout := time.After(15 * time.Second)
-
 	for {
-		numRead, err := conn.Read(msgBuf) // I hope it doesn't clear the buf
+		// fmt.Println("Buffer before reading [first 100]")
+		// for i := 0; i < 100; i++ {
+		// 	fmt.Printf("% x", msgBuf[i])
+		// }
+
+		tempBuf := make([]byte, MAX_RESPONSE_SIZE)
+		numRead, err := conn.Read(tempBuf)
 		if err != nil {
-			e := fmt.Errorf("Error reading from %v:\n %w", peerHost, err)
-			errors <- e
+			errors <- err
 			return
 		}
 
-		fmt.Printf("%v sent %v bytes\n", peerHost, numRead)
+		fmt.Printf("Read %v bytes from %v, parsing...\n", numRead, peerHost)
+		msgDataEndIdx += numRead
 
-		msgList, err := parseMultiMessage(msgBuf[:numRead], expectedInfoHash)
+		// TODO: Replace
+		if binary.BigEndian.Uint64(msgBuf) == 0 {
+			// fmt.Println("Didn't already contain fragment(s)")
+			copy(msgBuf, tempBuf)
+		} else {
+			fmt.Println("Appended to earlier fragment")
+			for i := 0; i < numRead; i++ {
+				msgBuf = append(msgBuf, tempBuf[i])
+			}
+		}
+
+		msgList, err := parseMultiMessage(msgBuf[:msgDataEndIdx], expectedInfoHash)
 		if err != nil {
 			e := fmt.Errorf("Error when talking to %v:\n %w", peerHost, err)
 			errors <- e
@@ -396,7 +404,6 @@ func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr st
 		}
 
 		for _, msg := range msgList {
-			fmt.Printf("%v sent %v\n", peerHost, msg.kind)
 			switch msg.kind {
 			case handshake:
 				fmt.Printf("%v has peer id %v\n", peerHost, string(msg.peerId))
@@ -412,8 +419,7 @@ func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr st
 				unchokeMsg := createUnchokeMessage()
 				fmt.Printf("Sending unchoke to %v\n", peerHost)
 				if _, err := conn.Write(unchokeMsg); err != nil {
-					e := fmt.Errorf("Error sending unchoke: %w", err)
-					errors <- e
+					errors <- err
 					return
 				}
 
@@ -424,39 +430,35 @@ func establishPeerConnection(expectedInfoHash, myPeerIdBytes []byte, peerAddr st
 
 				fmt.Printf("Sending request for piece %v with block offset %v to %v\n", chosenPieceIdx, offset, peerHost)
 				if _, err := conn.Write(reqMsg); err != nil {
-					e := fmt.Errorf("Error requesting piece %v with block offset %v: %w", chosenPieceIdx, offset, err)
-					errors <- e
+					errors <- err
 					return
 				}
 			case piece:
-				fmt.Println("Received block:", msg.blockData)
+				fmt.Println("Block data (truncated):", msg.blockData[:100])
 			}
 		}
 
-		// If last message was a fragment, leave in the buffer so we can attempt to parse it again
-		clearUpTo := len(msgBuf)
-
-		for i := 0; i < len(msgList)-1; i++ {
-			if msgList[i+1].kind == fragment {
-				clearUpTo = msgList[i].endIdxInPacket
-				fmt.Printf("Msg buf before clearing: % x\n", msgBuf[:numRead])
-				fmt.Println("Clearing up to:", clearUpTo)
+		startOfFirstFragment := 0
+		for _, msg := range msgList {
+			if msg.kind != fragment {
+				startOfFirstFragment += msg.totalLen
 			}
 		}
 
-		for i := 0; i < clearUpTo; i++ {
+		fmt.Printf("Clearing first %v bytes\n", startOfFirstFragment)
+		for i := 0; i < startOfFirstFragment; i++ {
 			msgBuf[i] = 0
 		}
 
-		if clearUpTo != len(msgBuf) {
-			fmt.Printf("Cleared, msg buf now contains % x\n:", msgBuf[:100])
+		if startOfFirstFragment == numRead {
+			// fmt.Println("No fragments, cleared entire buf")
+			msgDataEndIdx = 0
+		} else {
+			msgBuf = msgBuf[startOfFirstFragment:]
+			// fmt.Printf("Cleared and advanced, msg buf now should contain: (truncated) % x\n", msgBuf[:100])
 		}
 
-		select {
-		case <-timeout:
-			done <- struct{}{}
-			return
-		}
+		fmt.Println()
 	}
 }
 
@@ -570,14 +572,14 @@ func (m messageKinds) String() string {
 }
 
 type peerMessage struct {
-	kind           messageKinds
-	endIdxInPacket int
-	peerId         []byte
-	pieceIdx       int
-	bitfield       []byte
-	blockOffset    int
-	blockLen       int
-	blockData      []byte
+	kind        messageKinds
+	totalLen    int
+	peerId      []byte
+	pieceIdx    int
+	bitfield    []byte
+	blockOffset int
+	blockLen    int
+	blockData   []byte
 }
 
 type pieceData struct {
@@ -606,21 +608,24 @@ func parseMultiMessage(buf, expectedInfoHash []byte) ([]peerMessage, error) {
 			return nil, err
 		}
 		msgList = append(msgList, msg)
-		i += msg.endIdxInPacket
+		i += msg.totalLen
 	}
 	return msgList, nil
 }
 
 func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
-	// TODO: More robust check for handshake presence
-	if int(buf[0]) == 19 {
+	handshakeStart := []byte{0x13, 0x42, 0x69, 0x74, 0x54}
+	bufStart := buf[:len(handshakeStart)]
+	if slices.Equal(bufStart, handshakeStart) {
 		msg, e = parseHandshake(buf, expectedInfoHash)
+		fmt.Println("Peer sent", msg.kind)
 		return
 	}
 
 	if len(buf) == 4 {
 		msg.kind = keepalive
-		msg.endIdxInPacket = 4
+		msg.totalLen = 4
+		fmt.Println("Peer sent", msg.kind)
 		return
 	}
 
@@ -630,8 +635,9 @@ func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
 	if lenVal > len(buf) {
 		// Message needs to be reassembled from this packet and the next
 		msg.kind = fragment
-		msg.endIdxInPacket = len(buf)
-		fmt.Printf("Partial payload: % x\n", buf)
+		msg.totalLen = len(buf)
+		fmt.Printf("Peer wanted to send %v bytes but we only got %v from this read\n", lenVal, len(buf))
+		fmt.Println("Peer sent", msg.kind)
 		return
 	}
 
@@ -642,29 +648,30 @@ func parseMessage(buf, expectedInfoHash []byte) (msg peerMessage, e error) {
 		msg.pieceIdx = int(binary.BigEndian.Uint32(buf[5:9]))
 	}
 
-	msg.endIdxInPacket = lenVal + 4 // Include 4-byte length prefix
+	msg.totalLen = lenVal + 4 // Include length prefix
 
-	if msg.endIdxInPacket > len(buf) {
-		panic(fmt.Sprintf("Out of bounds of msg buffer: %v / %v", msg.endIdxInPacket, len(buf)))
+	if msg.totalLen > len(buf) {
+		panic(fmt.Sprintf("Out of bounds of msg buffer: %v / %v", msg.totalLen, len(buf)))
 	}
 
 	switch msg.kind {
 	case bitfield:
-		msg.bitfield = buf[5:msg.endIdxInPacket]
+		msg.bitfield = buf[5:msg.totalLen]
 	case request:
 		msg.blockOffset = int(binary.BigEndian.Uint32(buf[9:13]))
-		msg.blockLen = int(binary.BigEndian.Uint32(buf[13:msg.endIdxInPacket]))
+		msg.blockLen = int(binary.BigEndian.Uint32(buf[13:msg.totalLen]))
 	case piece:
 		msg.blockOffset = int(binary.BigEndian.Uint32(buf[9:13]))
-		msg.blockData = buf[13:msg.endIdxInPacket]
+		msg.blockData = buf[13:msg.totalLen]
 	}
 
+	fmt.Println("Peer sent", msg.kind)
 	return
 }
 
 func parseHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
 	msg := peerMessage{}
-	protocolLen := int(buf[0]) // Should be 19
+	protocolLen := int(buf[0]) // Should be 19 or 0x13
 
 	// protocolBytes := buf[1 : protocolLen+1]
 	// reservedBytes := buf[protocolLen+1 : protocolLen+9]
@@ -677,7 +684,7 @@ func parseHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
 	peerId := buf[protocolLen+29 : protocolLen+49]
 
 	msg.kind = handshake
-	msg.endIdxInPacket = protocolLen + 49
+	msg.totalLen = protocolLen + 49
 	msg.peerId = peerId
 	return msg, nil
 }
@@ -686,18 +693,6 @@ func (t *Torrent) StoreSeeders(n int) {
 	t.Lock()
 	defer t.Unlock()
 	t.seeders = n
-}
-
-func (t *Torrent) LoadSeeders() int {
-	t.Lock()
-	defer t.Unlock()
-	return t.seeders
-}
-
-func (t *Torrent) LoadLeechers() int {
-	t.Lock()
-	defer t.Unlock()
-	return t.leechers
 }
 
 func (t *Torrent) StoreLeechers(n int) {
@@ -724,20 +719,8 @@ func (t *Torrent) StoreDownloaded(n int) {
 	t.downloaded = n
 }
 
-func (t *Torrent) LoadDownloaded() int {
-	t.Lock()
-	defer t.Unlock()
-	return t.downloaded
-}
-
 func (t *Torrent) StoreLeft(n int) {
 	t.Lock()
 	defer t.Unlock()
 	t.left = n
-}
-
-func (t *Torrent) LoadLeft() int {
-	t.Lock()
-	defer t.Unlock()
-	return t.left
 }

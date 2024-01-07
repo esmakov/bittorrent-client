@@ -1,5 +1,6 @@
 # Usage
 `go build`
+
 `bittorrent-client add [path to .torrent file]`
 
 ## Command line options
@@ -18,9 +19,9 @@
 - Save pieces to disk
 - Multi-file torrent support
 
-## Optimizations
+### Optimizations
 - Better piece download strategies (rarest first)
 - Better peer selection strategies (optimistic unchoking)
 
-## Completeness
+### Completeness
 - Support the dictionary model for tracker responses listing available peers
