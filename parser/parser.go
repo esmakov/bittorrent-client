@@ -123,10 +123,9 @@ func (p parser) MapPieceIndicesToHashes(concatPieceHashes string) (map[int]strin
 
 	m := make(map[int]string)
 
-	for i := 0; i < len(concatPieceHashes); {
+	for i := 0; i < len(concatPieceHashes); i += 20 {
 		hash := concatPieceHashes[i : i+20]
 		m[i+p.piecesStartIdx] = hash
-		i += 20
 	}
 
 	return m, nil

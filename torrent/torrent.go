@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -45,6 +46,10 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte, p
 	// Fields common to single-file and multi-file torrents
 	trackerHostname := metaInfoMap["announce"].(string)
 	infoMap := metaInfoMap["info"].(map[string]any)
+
+	numPieces := len(pieceHashes)
+	numElems := int(math.Ceil(float64(numPieces) / 8.0))
+	bitmask := make([]byte, numElems)
 
 	// Optional common fields
 	comment := ""
@@ -103,6 +108,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte, p
 		numFiles:         fileNum,
 		totalSize:        totalSize,
 		piecesLeft:       totalSize,
+		bitmask:          bitmask,
 	}
 }
 
@@ -113,7 +119,9 @@ func (t *Torrent) String() string {
 		fmt.Sprintln("Tracker:", t.trackerHostname),
 		fmt.Sprintf("Hash: % x\n", t.infoHash),
 		fmt.Sprintln("Total size: ", t.totalSize),
-		fmt.Sprintln("# of files: ", t.numFiles))
+		fmt.Sprintln("# of files: ", t.numFiles),
+		fmt.Sprintf("Bitmask: %b\n", t.bitmask),
+	)
 
 	if t.comment != "" {
 		str += fmt.Sprint("Comment:", t.comment)
@@ -196,8 +204,8 @@ func (t *Torrent) Start() error {
 	const MAX_PEERS = 1
 	numPeers := 0
 	for numPeers < MAX_PEERS {
-		peer := peerList[rand.Intn(len(peerList))]
-		go handleConnection(t.infoHash, myPeerIdBytes, peer, errors, done)
+		peer := getNextPeer(peerList)
+		go handleConnection(t, myPeerIdBytes, peer, errors, done)
 		numPeers++
 	}
 
@@ -206,6 +214,11 @@ func (t *Torrent) Start() error {
 		case e := <-errors:
 			log.Println("Error caught in start:", e)
 			numPeers--
+
+			for x := 0; x < MAX_PEERS-numPeers; x++ {
+				peer := getNextPeer(peerList)
+				go handleConnection(t, myPeerIdBytes, peer, errors, done)
+			}
 		case <-done:
 			fmt.Println("Completed in start")
 			numPeers--
@@ -214,12 +227,17 @@ func (t *Torrent) Start() error {
 	// TODO: Run in background
 }
 
+// TODO: Choose more intelligently
+func getNextPeer(peerList []string) string {
+	return peerList[rand.Intn(len(peerList))]
+}
+
 const BLOCK_SIZE = 16 * 1024
 
-func handleConnection(infoHash, myPeerIdBytes []byte, peerAddr string, errors chan error, done chan struct{}) {
+func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors chan error, done chan struct{}) {
 	parsedMessages := make(chan peerMessage, 5)
 	messagesToSend := make(chan []byte, 5)
-	go connectAndParse(infoHash, myPeerIdBytes, peerAddr, parsedMessages, messagesToSend, errors, done)
+	go connectAndParse(t.infoHash, myPeerIdBytes, peerAddr, parsedMessages, messagesToSend, errors, done)
 
 	connState := newConnState()
 	for {
@@ -254,8 +272,14 @@ func handleConnection(infoHash, myPeerIdBytes []byte, peerAddr string, errors ch
 				fmt.Printf("Sending request for piece %v with block offset %v to %v\n", chosenPieceIdx, offset, peerAddr)
 				messagesToSend <- reqMsg
 			case piece:
-				fmt.Println("Block data (truncated):", msg.blockData[:100])
 				// Update my bitfield
+				pieceByteIdx := msg.pieceIdx / 8
+				pieceBitIdx := 7 - (msg.pieceIdx % 8)
+				pieceByte := &t.bitmask[pieceByteIdx]
+				b := uint8(0x01) << pieceBitIdx
+				*pieceByte |= b
+				fmt.Printf("%b\n", t.bitmask)
+
 				// Save block
 				// Update offset and request another block (update block selection to use our bitfield)
 			}
@@ -301,7 +325,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 	for {
 		select {
 		case msg := <-messagesToSend:
-			fmt.Println("About to write", msg)
+			// fmt.Println("About to write", msg)
 			if _, err := conn.Write(msg); err != nil {
 				errs <- err
 				return
@@ -320,7 +344,6 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			errs <- err
 			return
 		}
-
 		fmt.Printf("Read %v bytes from %v, parsing...\n", numRead, peerHost)
 
 		// TODO: More versatile check
@@ -329,7 +352,6 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			copy(msgBuf, tempBuf)
 		} else {
 			fmt.Println("Appending to earlier fragment")
-			// fmt.Printf("Appending from idx %v to %v\n", msgDataEndIdx, msgDataEndIdx+numRead)
 			for i := 0; i < numRead; i++ {
 				msgBuf[msgDataEndIdx+i] = tempBuf[i]
 			}
