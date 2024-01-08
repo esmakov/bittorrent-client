@@ -74,7 +74,7 @@ func New(shouldPrettyPrint bool) parser {
 	}
 }
 
-// NOTE: Assumes that the provided file is a correctly-formatted metainfo file.
+// NOTE: Assumes that the provided file is correctly encoded
 func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, infoHash []byte, e error) {
 	fileBytes, err := io.ReadAll(fd)
 	if err != nil {
@@ -87,7 +87,7 @@ func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, in
 		return
 	}
 
-	// Extract info hash verbatim
+	// Extract info dict verbatim
 	if p.infoDictStartIdx == 0 || p.infoDictEndIdx == 0 {
 		e = errors.New("Didn't find info dict start or end")
 		return
@@ -115,7 +115,7 @@ func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, in
 }
 
 // Maps each piece hash to its index in the metainfo (.torrent) file
-// NOTE: Must be called after ParseMetaInfoFile
+// NOTE: Must run after ParseMetaInfoFile
 func (p parser) MapPieceIndicesToHashes(concatPieceHashes string) (map[int]string, error) {
 	if p.piecesStartIdx == 0 {
 		return nil, errors.New("Could not populate starting index of 'pieces' string")

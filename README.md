@@ -1,7 +1,7 @@
 # Usage
 `go build`
 
-`bittorrent-client add [path to .torrent file]`
+`./bittorrent-client add [path to .torrent file]`
 
 ## Command line options
 `-print` to print parse tree of .torrent file
@@ -14,7 +14,6 @@
 
 ## TODOs
 ### Critical
-- Reassemble peer message segments (likely with gopacket/tcpassembly or gopacket/reassembly)
 - Assemble chunks into pieces
 - Save pieces to disk
 - Multi-file torrent support
@@ -24,4 +23,5 @@
 - Better peer selection strategies (optimistic unchoking)
 
 ### Completeness
+- More subcommands: remove, pause/resume
 - Support the dictionary model for tracker responses listing available peers
