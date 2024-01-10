@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/esmakov/bittorrent-client/parser"
@@ -53,27 +54,23 @@ func main() {
 func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torrent, error) {
 	fd, err := os.Open(metaInfoFileName)
 	if err != nil {
-		return new(torrent.Torrent), err
+		return nil, err
 	}
 	defer fd.Close()
 
 	p := parser.New(shouldPrettyPrint)
-	topLevelMap, infoHash, err := p.ParseMetaInfoFile(fd)
+
+	fileBytes, err := io.ReadAll(fd)
 	if err != nil {
-		return new(torrent.Torrent), err
+		return nil, err
 	}
 
-	infoMap := topLevelMap["info"].(map[string]any)
-	pieceLength := infoMap["piece length"].(int)
-	_ = pieceLength
-	piecesStr := infoMap["pieces"].(string)
-
-	pieceHashes, err := p.MapPieceIndicesToHashes(piecesStr)
+	topLevelMap, infoHash, err := p.ParseMetaInfoFile(fileBytes)
 	if err != nil {
-		return new(torrent.Torrent), err
+		return nil, err
 	}
 
-	t := torrent.New(metaInfoFileName, topLevelMap, infoHash, pieceHashes)
+	t := torrent.New(metaInfoFileName, topLevelMap, infoHash)
 
 	return t, nil
 }

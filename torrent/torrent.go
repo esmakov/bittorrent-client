@@ -23,6 +23,33 @@ import (
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
+type pieceData struct {
+	data *[]byte
+	idx  int
+}
+
+func (p pieceData) update(msg peerMessage) {
+	block := (*p.data)[msg.blockOffset : msg.blockOffset+BLOCK_SIZE]
+	copy(block, msg.blockData)
+}
+
+func newPieceData(pieceLength, idx int) *pieceData {
+	// numBlocks := pieceLength / BLOCK_SIZE
+	data := make([]byte, pieceLength)
+	return &pieceData{data: &data, idx: idx}
+}
+
+func (p pieceData) isValidPiece(pieceHashes []string) (bool, error) {
+	if len(*p.data) == 0 {
+		return false, errors.New("Not enough data was supplied")
+	}
+	givenHash, err := hash.HashSHA1(*p.data)
+	if err != nil {
+		return false, err
+	}
+	return string(givenHash) == pieceHashes[p.idx], nil
+}
+
 type Torrent struct {
 	metaInfoFileName string
 	trackerHostname  string
@@ -30,7 +57,8 @@ type Torrent struct {
 	comment          string
 	infoHash         []byte
 	isPrivate        bool
-	pieceHashes      map[int]string
+	pieceHashes      []string
+	pieceLength      int
 	numFiles         int
 	totalSize        int
 	seeders          int
@@ -39,13 +67,32 @@ type Torrent struct {
 	piecesUploaded   int
 	piecesLeft       int
 	bitmask          []byte
+	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 	sync.Mutex
 }
 
-func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte, pieceHashes map[int]string) *Torrent {
+func splitPieceHashes(concatPieceHashes string) []string {
+	numPieces := len(concatPieceHashes) / 20
+	s := make([]string, numPieces)
+
+	j := 0
+	for i := 0; i < numPieces; i++ {
+		hash := concatPieceHashes[j : j+20]
+		s[i] = hash
+		j += 20
+	}
+	return s
+}
+
+func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) *Torrent {
 	// Fields common to single-file and multi-file torrents
 	trackerHostname := metaInfoMap["announce"].(string)
 	infoMap := metaInfoMap["info"].(map[string]any)
+
+	pieceLength := infoMap["piece length"].(int)
+	piecesStr := infoMap["pieces"].(string)
+
+	pieceHashes := splitPieceHashes(piecesStr)
 
 	numPieces := len(pieceHashes)
 	numElems := int(math.Ceil(float64(numPieces) / 8.0))
@@ -105,6 +152,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte, p
 		comment:          comment,
 		isPrivate:        isPrivate == 1,
 		pieceHashes:      pieceHashes,
+		pieceLength:      pieceLength,
 		numFiles:         fileNum,
 		totalSize:        totalSize,
 		piecesLeft:       totalSize,
@@ -120,7 +168,7 @@ func (t *Torrent) String() string {
 		fmt.Sprintf("Hash: % x\n", t.infoHash),
 		fmt.Sprintln("Total size: ", t.totalSize),
 		fmt.Sprintln("# of files: ", t.numFiles),
-		fmt.Sprintf("Bitmask: %b\n", t.bitmask),
+		// fmt.Sprintf("Bitmask: %08b\n", t.bitmask),
 	)
 
 	if t.comment != "" {
@@ -246,6 +294,9 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 			switch msg.kind {
 			case handshake:
 				fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
+			case have:
+			case request:
+			case keepalive:
 			case choke:
 				connState.peer_choking = true
 			case unchoke:
@@ -256,31 +307,29 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 				connState.peer_interested = false
 			case bitfield:
 				unchokeMsg := createUnchokeMessage()
-				fmt.Printf("Sending unchoke to %v\n", peerAddr)
 				messagesToSend <- unchokeMsg
+				fmt.Printf("Sending unchoke to %v\n", peerAddr)
 
 				chosenPieceIdx, err := randomNextPieceIdx(msg.bitfield)
 				if err != nil {
 					errors <- err
-					// TODO: Signal to close connection
+					// TODO: Signal connectAndParse to close connection
 					return
 				}
 				offset := uint32(0)
 				length := uint32(BLOCK_SIZE)
 				reqMsg := createRequestMessage(uint32(chosenPieceIdx), offset, length)
 
-				fmt.Printf("Sending request for piece %v with block offset %v to %v\n", chosenPieceIdx, offset, peerAddr)
 				messagesToSend <- reqMsg
+				fmt.Printf("Sending request for piece %v with block offset %v to %v\n", chosenPieceIdx, offset, peerAddr)
 			case piece:
-				// Update my bitfield
-				pieceByteIdx := msg.pieceIdx / 8
-				pieceBitIdx := 7 - (msg.pieceIdx % 8)
-				pieceByte := &t.bitmask[pieceByteIdx]
-				b := uint8(0x01) << pieceBitIdx
-				*pieceByte |= b
-				fmt.Printf("%b\n", t.bitmask)
+				// fmt.Println(msg.blockData)
+				// If piece is complete: t.updateBitfield(msg)
+				// fmt.Printf("%08b\n", t.bitmask)
 
 				// Save block
+
+				// If piece not complete:
 				// Update offset and request another block (update block selection to use our bitfield)
 			}
 		case e := <-errors:
@@ -291,6 +340,14 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 			return
 		}
 	}
+}
+
+func (t *Torrent) updateBitfield(msg peerMessage) {
+	pieceByteIdx := msg.pieceIdx / 8
+	pieceBitIdx := 7 - (msg.pieceIdx % 8)
+	pieceByte := &t.bitmask[pieceByteIdx]
+	b := uint8(0x01) << pieceBitIdx
+	*pieceByte |= b
 }
 
 func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMessages chan<- peerMessage, messagesToSend <-chan []byte, errs chan<- error, done chan<- struct{}) {
@@ -639,22 +696,6 @@ type peerMessage struct {
 	blockOffset int
 	blockLen    int
 	blockData   []byte
-}
-
-type pieceData struct {
-	data                  []byte
-	hashIdxInMetaInfoFile int
-}
-
-func (p pieceData) isValidPiece(pieceHashes map[int]string) (bool, error) {
-	if len(p.data) == 0 {
-		return false, errors.New("Not enough data was supplied")
-	}
-	givenHash, err := hash.HashSHA1(p.data)
-	if err != nil {
-		return false, err
-	}
-	return string(givenHash) == pieceHashes[p.hashIdxInMetaInfoFile], nil
 }
 
 // Sometimes multiple messages will be read from the stream at once

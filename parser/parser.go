@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 
 	"github.com/esmakov/bittorrent-client/hash"
@@ -75,15 +74,8 @@ func New(shouldPrettyPrint bool) parser {
 }
 
 // NOTE: Assumes that the provided file is correctly encoded
-func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, infoHash []byte, e error) {
-	fileBytes, err := io.ReadAll(fd)
-	if err != nil {
-		e = err
-		return
-	}
-
-	if err := p.bDecode(bytes.NewReader(fileBytes)); err != nil {
-		e = err
+func (p *parser) ParseMetaInfoFile(fileBytes []byte) (topLevelDict map[string]any, infoHash []byte, e error) {
+	if e = p.bDecode(bytes.NewReader(fileBytes)); e != nil {
 		return
 	}
 
@@ -98,15 +90,13 @@ func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, in
 	}
 
 	infoDictBytes := fileBytes[p.infoDictStartIdx : p.infoDictEndIdx+1]
-	infoHash, err = hash.HashSHA1(infoDictBytes)
-	if err != nil {
-		e = err
+	infoHash, e = hash.HashSHA1(infoDictBytes)
+	if e != nil {
 		return
 	}
 
 	// Skip start of dict
-	if _, err := p.consumeToken(); err != nil {
-		e = err
+	if _, e = p.consumeToken(); e != nil {
 		return
 	}
 
@@ -114,21 +104,17 @@ func (p *parser) ParseMetaInfoFile(fd *os.File) (topLevelDict map[string]any, in
 	return
 }
 
-// Maps each piece hash to its index in the metainfo (.torrent) file
-// NOTE: Must run after ParseMetaInfoFile
-func (p parser) MapPieceIndicesToHashes(concatPieceHashes string) (map[int]string, error) {
-	if p.piecesStartIdx == 0 {
-		return nil, errors.New("Could not populate starting index of 'pieces' string")
+func (p *parser) ParseResponse(r io.Reader) (map[string]any, error) {
+	if err := p.bDecode(r); err != nil {
+		return nil, err
 	}
 
-	m := make(map[int]string)
-
-	for i := 0; i < len(concatPieceHashes); i += 20 {
-		hash := concatPieceHashes[i : i+20]
-		m[i+p.piecesStartIdx] = hash
+	// Ignore start of dict
+	if _, err := p.consumeToken(); err != nil {
+		return nil, err
 	}
 
-	return m, nil
+	return p.parseDict(), nil
 }
 
 // While scanning, builds up the token list and populates indices around "info" dictionary
@@ -149,19 +135,6 @@ func (p *parser) bDecode(r io.Reader) error {
 	}
 
 	return nil
-}
-
-func (p *parser) ParseResponse(r io.Reader) (map[string]any, error) {
-	if err := p.bDecode(r); err != nil {
-		return nil, err
-	}
-
-	// Ignore start of dict
-	if _, err := p.consumeToken(); err != nil {
-		return nil, err
-	}
-
-	return p.parseDict(), nil
 }
 
 func (p *parser) parse(t btToken) any {
