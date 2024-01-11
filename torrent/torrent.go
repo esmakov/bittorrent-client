@@ -34,7 +34,6 @@ func (p pieceData) update(msg peerMessage) {
 }
 
 func newPieceData(pieceLength, idx int) *pieceData {
-	// numBlocks := pieceLength / BLOCK_SIZE
 	data := make([]byte, pieceLength)
 	return &pieceData{data: &data, idx: idx}
 }
@@ -50,6 +49,17 @@ func (p pieceData) isValidPiece(pieceHashes []string) (bool, error) {
 	return string(givenHash) == pieceHashes[p.idx], nil
 }
 
+func (p pieceData) isValidPiece2(piecesStr string) (bool, error) {
+	if len(*p.data) == 0 {
+		return false, errors.New("Not enough data was supplied")
+	}
+	givenHash, err := hash.HashSHA1(*p.data)
+	if err != nil {
+		return false, err
+	}
+	return string(givenHash) == piecesStr[p.idx*20:p.idx*20+20], nil
+}
+
 type Torrent struct {
 	metaInfoFileName string
 	trackerHostname  string
@@ -57,7 +67,7 @@ type Torrent struct {
 	comment          string
 	infoHash         []byte
 	isPrivate        bool
-	pieceHashes      []string
+	piecesStr        string
 	pieceLength      int
 	numFiles         int
 	totalSize        int
@@ -66,7 +76,7 @@ type Torrent struct {
 	piecesDownloaded int
 	piecesUploaded   int
 	piecesLeft       int
-	bitmask          []byte
+	bitfield         []byte
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 	sync.Mutex
 }
@@ -92,11 +102,9 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) *
 	pieceLength := infoMap["piece length"].(int)
 	piecesStr := infoMap["pieces"].(string)
 
-	pieceHashes := splitPieceHashes(piecesStr)
-
-	numPieces := len(pieceHashes)
-	numElems := int(math.Ceil(float64(numPieces) / 8.0))
-	bitmask := make([]byte, numElems)
+	numPieces := len(piecesStr) / 20
+	bitmaskLen := int(math.Ceil(float64(numPieces) / 8.0))
+	bitmask := make([]byte, bitmaskLen)
 
 	// Optional common fields
 	comment := ""
@@ -151,12 +159,12 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) *
 		infoHash:         infoHash,
 		comment:          comment,
 		isPrivate:        isPrivate == 1,
-		pieceHashes:      pieceHashes,
+		piecesStr:        piecesStr,
 		pieceLength:      pieceLength,
 		numFiles:         fileNum,
 		totalSize:        totalSize,
 		piecesLeft:       totalSize,
-		bitmask:          bitmask,
+		bitfield:         bitmask,
 	}
 }
 
@@ -284,10 +292,21 @@ const BLOCK_SIZE = 16 * 1024
 
 func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors chan error, done chan struct{}) {
 	parsedMessages := make(chan peerMessage, 5)
-	messagesToSend := make(chan []byte, 5)
-	go connectAndParse(t.infoHash, myPeerIdBytes, peerAddr, parsedMessages, messagesToSend, errors, done)
+	outboundMsgs := make(chan []byte, 5)
+	go connectAndParse(t.infoHash, myPeerIdBytes, peerAddr, parsedMessages, outboundMsgs, errors, done)
 
 	connState := newConnState()
+
+	currPieceIdx := 0
+	byteOffset := 0
+
+	numPieces := len(t.piecesStr) / 20
+	bitmaskLen := int(math.Ceil(float64(numPieces) / 8.0))
+
+	peerBitfield := make([]byte, bitmaskLen)
+
+	maxByteOffset := (numPieces - 1) * BLOCK_SIZE
+
 	for {
 		select {
 		case msg := <-parsedMessages:
@@ -306,31 +325,41 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 			case uninterested:
 				connState.peer_interested = false
 			case bitfield:
-				unchokeMsg := createUnchokeMessage()
-				messagesToSend <- unchokeMsg
+				peerBitfield = msg.bitfield
+
+				unchokeMsg := createUnchokeMsg()
+				outboundMsgs <- unchokeMsg
 				fmt.Printf("Sending unchoke to %v\n", peerAddr)
 
-				chosenPieceIdx, err := randomNextPieceIdx(msg.bitfield)
+				// Start in a random location
+				var err error
+				currPieceIdx, err = randomNextPieceIdx(peerBitfield)
 				if err != nil {
 					errors <- err
 					// TODO: Signal connectAndParse to close connection
 					return
 				}
-				offset := uint32(0)
-				length := uint32(BLOCK_SIZE)
-				reqMsg := createRequestMessage(uint32(chosenPieceIdx), offset, length)
 
-				messagesToSend <- reqMsg
-				fmt.Printf("Sending request for piece %v with block offset %v to %v\n", chosenPieceIdx, offset, peerAddr)
+				reqMsg := createRequestMsg(currPieceIdx, byteOffset, BLOCK_SIZE)
+				outboundMsgs <- reqMsg
+				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", currPieceIdx, byteOffset, peerAddr)
 			case piece:
 				// fmt.Println(msg.blockData)
-				// If piece is complete: t.updateBitfield(msg)
-				// fmt.Printf("%08b\n", t.bitmask)
+				// Store block
 
-				// Save block
+				if byteOffset < maxByteOffset { // Incomplete piece
+					byteOffset += BLOCK_SIZE
+				} else {
+					updateBitfield(&t.bitfield, msg)
+					currPieceIdx++
+					byteOffset = 0
+					// nextSequentialPieceIdx(&currPieceIdx)
+					// fmt.Printf("%08b\n", t.bitmask)
+				}
 
-				// If piece not complete:
-				// Update offset and request another block (update block selection to use our bitfield)
+				reqMsg := createRequestMsg(currPieceIdx, byteOffset, BLOCK_SIZE)
+				outboundMsgs <- reqMsg
+				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", currPieceIdx, byteOffset, peerAddr)
 			}
 		case e := <-errors:
 			log.Println("Error caught in handler:", e)
@@ -342,24 +371,18 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 	}
 }
 
-func (t *Torrent) updateBitfield(msg peerMessage) {
+func updateBitfield(bitfield *[]byte, msg peerMessage) {
 	pieceByteIdx := msg.pieceIdx / 8
-	pieceBitIdx := 7 - (msg.pieceIdx % 8)
-	pieceByte := &t.bitmask[pieceByteIdx]
-	b := uint8(0x01) << pieceBitIdx
+	bitsFromRight := 7 - (msg.pieceIdx % 8)
+	pieceByte := &(*bitfield)[pieceByteIdx]
+	b := uint8(0x01) << bitsFromRight
 	*pieceByte |= b
 }
 
-func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMessages chan<- peerMessage, messagesToSend <-chan []byte, errs chan<- error, done chan<- struct{}) {
+func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMessages chan<- peerMessage, outboundMsgs <-chan []byte, errs chan<- error, done chan<- struct{}) {
 	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13 // Piece message header
 
-	peerHost, _, err := net.SplitHostPort(peerAddr)
-	if err != nil {
-		errs <- err
-		return
-	}
-
-	fmt.Println("Connecting to peer", peerHost, "...")
+	fmt.Println("Connecting to peer", peerAddr, "...")
 
 	conn, err := net.DialTimeout("tcp", peerAddr, 1*time.Second)
 	if err != nil {
@@ -368,7 +391,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 	}
 	defer conn.Close()
 
-	fmt.Println("Connected to peer", peerHost)
+	fmt.Println("Connected to peer", peerAddr)
 
 	handshakeMsg := createHandshakeMsg(infoHash, myPeerIdBytes)
 	if _, err := conn.Write(handshakeMsg); err != nil {
@@ -377,11 +400,11 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 	}
 
 	msgBuf := make([]byte, 32*1024)
-	msgDataEndIdx := 0
+	msgBufEndIdx := 0
 
 	for {
 		select {
-		case msg := <-messagesToSend:
+		case msg := <-outboundMsgs:
 			// fmt.Println("About to write", msg)
 			if _, err := conn.Write(msg); err != nil {
 				errs <- err
@@ -392,16 +415,18 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 		}
 
 		tempBuf := make([]byte, MAX_RESPONSE_SIZE)
+
 		conn.SetReadDeadline(time.Now().Add(time.Millisecond * 500))
+
 		numRead, err := conn.Read(tempBuf)
-		if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
 			// fmt.Println("Nothing to read")
 			continue
 		} else if err != nil {
 			errs <- err
 			return
 		}
-		fmt.Printf("Read %v bytes from %v, parsing...\n", numRead, peerHost)
+		fmt.Printf("Read %v bytes from %v, parsing...\n", numRead, peerAddr)
 
 		// TODO: More versatile check
 		if binary.BigEndian.Uint64(msgBuf) == 0 {
@@ -410,40 +435,40 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 		} else {
 			fmt.Println("Appending to earlier fragment")
 			for i := 0; i < numRead; i++ {
-				msgBuf[msgDataEndIdx+i] = tempBuf[i]
+				msgBuf[msgBufEndIdx+i] = tempBuf[i]
 			}
 		}
 
-		msgDataEndIdx += numRead
+		msgBufEndIdx += numRead
 
-		copyToParse := slices.Clone(msgBuf[:msgDataEndIdx]) // Passing a slice of msgBuf to the msg structs causes them to be cleared as well
+		copyToParse := slices.Clone(msgBuf[:msgBufEndIdx]) // Passing a slice of msgBuf to the msg structs causes them to be cleared as well
 		msgList, err := parseMultiMessage(copyToParse, infoHash)
 		if err != nil {
 			errs <- err
 			return
 		}
 
-		startOfFirstFragment := 0
+		firstFragmentIdx := 0
 		for _, msg := range msgList {
 			fmt.Println("Parsed", msg.kind)
 			parsedMessages <- msg
 
 			if msg.kind != fragment {
-				startOfFirstFragment += msg.totalLen
+				firstFragmentIdx += msg.totalLen
 			}
 		}
 
-		for i := 0; i < startOfFirstFragment; i++ {
+		for i := 0; i < firstFragmentIdx; i++ {
 			msgBuf[i] = 0
 		}
 
-		if startOfFirstFragment == msgDataEndIdx {
-			msgDataEndIdx = 0
-		} else if startOfFirstFragment != 0 {
-			// Copy data to start to eliminate leading 0s
-			dataLen := msgDataEndIdx - startOfFirstFragment
-			copy(msgBuf, msgBuf[startOfFirstFragment:])
-			msgDataEndIdx = dataLen
+		if firstFragmentIdx == msgBufEndIdx {
+			msgBufEndIdx = 0
+		} else if firstFragmentIdx != 0 {
+			// Copy over leading 0s
+			dataLen := msgBufEndIdx - firstFragmentIdx
+			copy(msgBuf, msgBuf[firstFragmentIdx:])
+			msgBufEndIdx = dataLen
 		}
 
 		fmt.Println()
@@ -574,11 +599,11 @@ func extractCompactPeers(s string) ([]string, error) {
 	return list, nil
 }
 
-func createUnchokeMessage() []byte {
+func createUnchokeMsg() []byte {
 	return []byte{0x00, 0x00, 0x00, 0x01, 0x01}
 }
 
-func createRequestMessage(idx, offset, length uint32) []byte {
+func createRequestMsg(pieceIdx, offset, length int) []byte {
 	lengthAndID := []byte{
 		0x00,
 		0x00,
@@ -589,7 +614,7 @@ func createRequestMessage(idx, offset, length uint32) []byte {
 	bytes := make([]byte, 4+13)
 	copy(bytes, lengthAndID)
 
-	payload := []uint32{idx, offset, length}
+	payload := []uint32{uint32(pieceIdx), uint32(offset), uint32(length)}
 	for i, v := range payload {
 		index := i*4 + 5
 		binary.BigEndian.PutUint32(bytes[index:index+4], v)
