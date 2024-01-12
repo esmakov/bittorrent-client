@@ -23,43 +23,6 @@ import (
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
-type pieceData struct {
-	data *[]byte
-	idx  int
-}
-
-func (p pieceData) update(msg peerMessage) {
-	block := (*p.data)[msg.blockOffset : msg.blockOffset+BLOCK_SIZE]
-	copy(block, msg.blockData)
-}
-
-func newPieceData(pieceLength, idx int) *pieceData {
-	data := make([]byte, pieceLength)
-	return &pieceData{data: &data, idx: idx}
-}
-
-func (p pieceData) isValidPiece(pieceHashes []string) (bool, error) {
-	if len(*p.data) == 0 {
-		return false, errors.New("Not enough data was supplied")
-	}
-	givenHash, err := hash.HashSHA1(*p.data)
-	if err != nil {
-		return false, err
-	}
-	return string(givenHash) == pieceHashes[p.idx], nil
-}
-
-func (p pieceData) isValidPiece2(piecesStr string) (bool, error) {
-	if len(*p.data) == 0 {
-		return false, errors.New("Not enough data was supplied")
-	}
-	givenHash, err := hash.HashSHA1(*p.data)
-	if err != nil {
-		return false, err
-	}
-	return string(givenHash) == piecesStr[p.idx*20:p.idx*20+20], nil
-}
-
 type Torrent struct {
 	metaInfoFileName string
 	trackerHostname  string
@@ -191,14 +154,6 @@ One goroutine has to listen for incoming connections on the port we announced to
 
 Another goroutine has to keep talking to the tracker
 
-While # of connections <= MAX_PEERS, go through list of peers and attempt to establish a conn
-Spawn a goroutine for each connection that has to:
-As piece messages come in, store data block in memory
-As pieces complete:
-Check hash and die if incorrect, also blacklist peer
-Signal main goroutine to update torrent state
-Save piece to disk
-
 Want to write each piece to disk as it completes, but:
 - pieces may be out of order
 - pieces may cross file boundaries
@@ -206,10 +161,6 @@ Want to write each piece to disk as it completes, but:
 One strategy:
 - preallocate enough disk space for entire torrent
 - as each piece comes in, do buffered writes to its offset in the file
-
-Either each goroutine needs (synchronized) access to the torrent state (which is simpler), or
-There needs to be a main goroutine sending each "connection handler" goroutine updates about
-which pieces are downloaded
 */
 
 func (t *Torrent) Start() error {
@@ -271,10 +222,9 @@ func (t *Torrent) Start() error {
 			log.Println("Error caught in start:", e)
 			numPeers--
 
-			for x := 0; x < MAX_PEERS-numPeers; x++ {
-				peer := getNextPeer(peerList)
-				go handleConnection(t, myPeerIdBytes, peer, errors, done)
-			}
+			peer := getNextPeer(peerList)
+			go handleConnection(t, myPeerIdBytes, peer, errors, done)
+			numPeers++
 		case <-done:
 			fmt.Println("Completed in start")
 			numPeers--
@@ -290,6 +240,31 @@ func getNextPeer(peerList []string) string {
 
 const BLOCK_SIZE = 16 * 1024
 
+type pieceData struct {
+	data []byte
+	idx  int
+}
+
+func (p pieceData) updateWithCopy(msg peerMessage) {
+	block := p.data[msg.blockOffset : msg.blockOffset+BLOCK_SIZE]
+	// TODO: Don't copy each block twice
+	copy(block, msg.blockData)
+}
+
+func NewPieceData(pieceLength, idx int) *pieceData {
+	// Pre-allocate enough to store an entire piece worth of blocks sequentially
+	data := make([]byte, pieceLength)
+	return &pieceData{data: data, idx: idx}
+}
+
+func (p pieceData) isValidPiece(piecesStr string) (bool, error) {
+	givenHash, err := hash.HashSHA1(p.data)
+	if err != nil {
+		return false, err
+	}
+	return string(givenHash) == piecesStr[p.idx*20:p.idx*20+20], nil
+}
+
 func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors chan error, done chan struct{}) {
 	parsedMessages := make(chan peerMessage, 5)
 	outboundMsgs := make(chan []byte, 5)
@@ -297,15 +272,16 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 
 	connState := newConnState()
 
-	currPieceIdx := 0
-	byteOffset := 0
-
-	numPieces := len(t.piecesStr) / 20
+	numPieces := t.totalSize / t.pieceLength
 	bitmaskLen := int(math.Ceil(float64(numPieces) / 8.0))
 
 	peerBitfield := make([]byte, bitmaskLen)
 
-	maxByteOffset := (numPieces - 1) * BLOCK_SIZE
+	numBlocks := t.pieceLength / BLOCK_SIZE
+	maxByteOffset := (numBlocks - 1) * BLOCK_SIZE
+
+	byteOffset := 0
+	p := NewPieceData(t.pieceLength, 0)
 
 	for {
 		select {
@@ -333,40 +309,44 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 
 				// Start in a random location
 				var err error
-				currPieceIdx, err = randomNextPieceIdx(peerBitfield)
+				p.idx, err = randomNextPieceIdx(peerBitfield)
 				if err != nil {
 					errors <- err
-					// TODO: Signal connectAndParse to close connection
+					close(outboundMsgs)
 					return
 				}
 
-				reqMsg := createRequestMsg(currPieceIdx, byteOffset, BLOCK_SIZE)
+				reqMsg := createRequestMsg(p.idx, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", currPieceIdx, byteOffset, peerAddr)
+				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.idx, byteOffset, peerAddr)
 			case piece:
-				// fmt.Println(msg.blockData)
-				// Store block
+				p.updateWithCopy(msg)
 
 				if byteOffset < maxByteOffset { // Incomplete piece
 					byteOffset += BLOCK_SIZE
+					fmt.Println(byteOffset, "/", maxByteOffset, "bytes")
 				} else {
+					fmt.Println("Downloaded piece", p.idx)
+					correct, err := p.isValidPiece(t.piecesStr)
+					if err != nil || !correct {
+						errors <- err
+						close(outboundMsgs)
+						return
+					}
+
 					updateBitfield(&t.bitfield, msg)
-					currPieceIdx++
+
+					p.idx++ // TODO: Get next available piece based on our bitfields
 					byteOffset = 0
-					// nextSequentialPieceIdx(&currPieceIdx)
+					// p.writeToDisk()
+					// p.clear()
 					// fmt.Printf("%08b\n", t.bitmask)
 				}
 
-				reqMsg := createRequestMsg(currPieceIdx, byteOffset, BLOCK_SIZE)
+				reqMsg := createRequestMsg(p.idx, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", currPieceIdx, byteOffset, peerAddr)
+				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.idx, byteOffset, peerAddr)
 			}
-		case e := <-errors:
-			log.Println("Error caught in handler:", e)
-			return
-		case <-done:
-			fmt.Println("Completed in handler")
-			return
 		}
 	}
 }
@@ -404,8 +384,12 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 
 	for {
 		select {
-		case msg := <-outboundMsgs:
-			// fmt.Println("About to write", msg)
+		case msg, more := <-outboundMsgs:
+			if !more {
+				fmt.Println("Handler signaled to drop connection")
+				return
+			}
+
 			if _, err := conn.Write(msg); err != nil {
 				errs <- err
 				return
@@ -742,7 +726,7 @@ func parseMessage(buf, infoHash []byte) (msg peerMessage, e error) {
 	handshakeStart := []byte{0x13, 0x42, 0x69, 0x74, 0x54}
 	bufStart := buf[:len(handshakeStart)]
 	if slices.Equal(bufStart, handshakeStart) {
-		msg, e = parseHandshake(buf, infoHash)
+		msg, e = parseAndVerifyHandshake(buf, infoHash)
 		return
 	}
 
@@ -757,9 +741,9 @@ func parseMessage(buf, infoHash []byte) (msg peerMessage, e error) {
 
 	if lenVal > len(buf) || len(buf) < 4 {
 		// Message needs to be reassembled from this packet and the next
+		// fmt.Printf("Message is %v bytes long but we only have %v so far\n", lenVal, len(buf))
 		msg.kind = fragment
 		msg.totalLen = len(buf)
-		fmt.Printf("Message is %v bytes long but we only have %v so far\n", lenVal, len(buf))
 		return
 	}
 
@@ -790,7 +774,7 @@ func parseMessage(buf, infoHash []byte) (msg peerMessage, e error) {
 	return
 }
 
-func parseHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
+func parseAndVerifyHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
 	msg := peerMessage{}
 	protocolLen := int(buf[0]) // Should be 19 or 0x13
 
