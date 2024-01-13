@@ -1,3 +1,5 @@
+A minimalist (read: lacking features) bittorrent client with no dependencies outside the Go standard library.
+
 # Usage
 `go build`
 
@@ -10,7 +12,10 @@
 - Parses bencoded metainfo (.torrent) files and bencoded tracker responses
 - Parses [peer message format](https://wiki.theory.org/BitTorrentSpecification#Messages)
 - Supports bencoding structured data for serialization
-- Sends handshake and (random) piece request messages
+
+### Supported BEPs
+- 3: Basic BitTorrent protocol (in progress)
+- 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
 ### Critical
