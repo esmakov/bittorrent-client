@@ -32,6 +32,7 @@ type Torrent struct {
 	isPrivate        bool
 	piecesStr        string
 	pieceLength      int
+	numPieces        int
 	numFiles         int
 	totalSize        int
 	seeders          int
@@ -124,6 +125,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) *
 		isPrivate:        isPrivate == 1,
 		piecesStr:        piecesStr,
 		pieceLength:      pieceLength,
+		numPieces:        totalSize / pieceLength,
 		numFiles:         fileNum,
 		totalSize:        totalSize,
 		piecesLeft:       totalSize,
@@ -251,18 +253,18 @@ func (p pieceData) updateWithCopy(msg peerMessage) {
 	copy(block, msg.blockData)
 }
 
-func NewPieceData(pieceLength, idx int) *pieceData {
+func NewPieceData(pieceLength int) *pieceData {
 	// Pre-allocate enough to store an entire piece worth of blocks sequentially
 	data := make([]byte, pieceLength)
-	return &pieceData{data: data, idx: idx}
+	return &pieceData{data: data}
 }
 
-func (p pieceData) isValidPiece(piecesStr string) (bool, error) {
+func (t *Torrent) checkHash(p pieceData) (bool, error) {
 	givenHash, err := hash.HashSHA1(p.data)
 	if err != nil {
 		return false, err
 	}
-	return string(givenHash) == piecesStr[p.idx*20:p.idx*20+20], nil
+	return string(givenHash) == t.piecesStr[p.idx*20:p.idx*20+20], nil
 }
 
 func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors chan error, done chan struct{}) {
@@ -272,24 +274,22 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 
 	connState := newConnState()
 
-	numPieces := t.totalSize / t.pieceLength
-	bitmaskLen := int(math.Ceil(float64(numPieces) / 8.0))
-
+	bitmaskLen := int(math.Ceil(float64(t.numPieces) / 8.0))
 	peerBitfield := make([]byte, bitmaskLen)
 
 	numBlocks := t.pieceLength / BLOCK_SIZE
 	maxByteOffset := (numBlocks - 1) * BLOCK_SIZE
 
 	byteOffset := 0
-	p := NewPieceData(t.pieceLength, 0)
+	p := NewPieceData(t.pieceLength)
 
 	for {
 		select {
 		case msg := <-parsedMessages:
+			fmt.Println("Parsed a", msg.kind)
 			switch msg.kind {
 			case handshake:
 				fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
-			case have:
 			case request:
 			case keepalive:
 			case choke:
@@ -309,7 +309,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 
 				// Start in a random location
 				var err error
-				p.idx, err = randomNextPieceIdx(peerBitfield)
+				p.idx, err = randAvailablePieceIdx(t.numPieces, peerBitfield, t.bitfield)
 				if err != nil {
 					errors <- err
 					close(outboundMsgs)
@@ -324,37 +324,44 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 
 				if byteOffset < maxByteOffset { // Incomplete piece
 					byteOffset += BLOCK_SIZE
-					fmt.Println(byteOffset, "/", maxByteOffset, "bytes")
+					fmt.Println(byteOffset, "/", t.pieceLength, "bytes")
 				} else {
-					fmt.Println("Downloaded piece", p.idx)
-					correct, err := p.isValidPiece(t.piecesStr)
+					fmt.Println("Downloaded piece", p.idx, ", checking...")
+					correct, err := t.checkHash(*p)
 					if err != nil || !correct {
 						errors <- err
 						close(outboundMsgs)
 						return
 					}
 
-					updateBitfield(&t.bitfield, msg)
+					updateBitfield(&t.bitfield, msg.pieceIdx)
 
-					p.idx++ // TODO: Get next available piece based on our bitfields
+					p.idx, err = nextAvailablePieceIdx(p.idx, t.numPieces, peerBitfield, t.bitfield)
+					if err != nil {
+						errors <- err
+						close(outboundMsgs)
+						return
+					}
 					byteOffset = 0
-					// p.writeToDisk()
-					// p.clear()
-					// fmt.Printf("%08b\n", t.bitmask)
+					// TODO: Write to disk
+
+					// Do I even need to clear p.data?
 				}
 
 				reqMsg := createRequestMsg(p.idx, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
 				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.idx, byteOffset, peerAddr)
+			case have:
+				updateBitfield(&peerBitfield, msg.pieceIdx)
 			}
 		}
 	}
 }
 
-func updateBitfield(bitfield *[]byte, msg peerMessage) {
-	pieceByteIdx := msg.pieceIdx / 8
-	bitsFromRight := 7 - (msg.pieceIdx % 8)
-	pieceByte := &(*bitfield)[pieceByteIdx]
+func updateBitfield(bitfield *[]byte, pieceIdx int) {
+	pieceByteIdx := pieceIdx / 8
+	bitsFromRight := 7 - (pieceIdx % 8)
+	pieceByte := &((*bitfield)[pieceByteIdx])
 	b := uint8(0x01) << bitsFromRight
 	*pieceByte |= b
 }
@@ -386,7 +393,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 		select {
 		case msg, more := <-outboundMsgs:
 			if !more {
-				fmt.Println("Handler signaled to drop connection")
+				log.Println("Handler signaled to drop connection")
 				return
 			}
 
@@ -417,7 +424,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			// fmt.Println("Didn't already contain fragment(s)")
 			copy(msgBuf, tempBuf)
 		} else {
-			fmt.Println("Appending to earlier fragment")
+			// fmt.Println("Appending to earlier fragment")
 			for i := 0; i < numRead; i++ {
 				msgBuf[msgBufEndIdx+i] = tempBuf[i]
 			}
@@ -434,7 +441,6 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 
 		firstFragmentIdx := 0
 		for _, msg := range msgList {
-			fmt.Println("Parsed", msg.kind)
 			parsedMessages <- msg
 
 			if msg.kind != fragment {
@@ -607,27 +613,43 @@ func createRequestMsg(pieceIdx, offset, length int) []byte {
 	return bytes
 }
 
-// TODO: Cross-reference against the bitfield representing pieces we already have
-func randomNextPieceIdx(bitfield []byte) (int, error) {
+func randAvailablePieceIdx(numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
 	attempts := 0
-	for attempts < len(bitfield) {
-		randByteIdx := rand.Intn(len(bitfield))
-		randByte := bitfield[randByteIdx]
-		if randByte == 0 {
-			// No completed pieces here
-			attempts++
-			// fmt.Println("Didn't find completed pieces this byte, continuing after attempt", attempts)
-			continue
-		}
-		// From right to left, find first bit == 1
-		for bitIdx := 0; bitIdx < 8; bitIdx++ {
-			mask := byte(1 << bitIdx)
-			if randByte&mask == 1 {
-				// Get idx starting from left-hand side of bitfield
-				return randByteIdx + (7 - bitIdx), nil
+	for attempts < numPieces {
+		randByteIdx := rand.Intn(len(peerBitfield))
+		byteToCheck := peerBitfield[randByteIdx]
+		for bitsFromRight := 7; bitsFromRight >= 0; bitsFromRight-- {
+			mask := byte(1 << bitsFromRight)
+			if byteToCheck&mask != 0 && ourBitfield[randByteIdx]&mask == 0 {
+				return randByteIdx*8 + (7 - bitsFromRight), nil
 			}
+			attempts++
 		}
 	}
+	return 0, errors.New("Peer has no pieces we want")
+}
+
+func nextAvailablePieceIdx(currBitIdx, numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
+	byteToCheckIdx := (currBitIdx + 1) / 8
+	byteToCheck := peerBitfield[byteToCheckIdx]
+
+	attempts := 0
+	for attempts < numPieces {
+		for bitsFromRight := 7; bitsFromRight >= 0; bitsFromRight-- {
+			mask := byte(1 << bitsFromRight)
+			if byteToCheck&mask == mask && ourBitfield[byteToCheckIdx]&mask == 0 {
+				return currBitIdx + (7 - bitsFromRight), nil
+			}
+			attempts++
+		}
+
+		byteToCheckIdx++
+		if byteToCheckIdx == len(peerBitfield) {
+			byteToCheckIdx = 0
+		}
+		byteToCheck = peerBitfield[byteToCheckIdx]
+	}
+
 	return 0, errors.New("Peer has no pieces we want")
 }
 
