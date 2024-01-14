@@ -210,7 +210,7 @@ func (t *Torrent) Start() error {
 	done := make(chan struct{}, 5)
 
 	// TODO: Maintain N active peers
-	const MAX_PEERS = 1
+	const MAX_PEERS = 2
 	numPeers := 0
 	for numPeers < MAX_PEERS {
 		peer := getNextPeer(peerList)
@@ -286,7 +286,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 	for {
 		select {
 		case msg := <-parsedMessages:
-			fmt.Println("Parsed a", msg.kind)
+			fmt.Println("Parsed a", msg.kind, "from", peerAddr)
 			switch msg.kind {
 			case handshake:
 				fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
@@ -335,6 +335,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 					}
 
 					updateBitfield(&t.bitfield, msg.pieceIdx)
+					fmt.Printf("%b\n", t.bitfield)
 
 					p.idx, err = nextAvailablePieceIdx(p.idx, t.numPieces, peerBitfield, t.bitfield)
 					if err != nil {
@@ -417,7 +418,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			errs <- err
 			return
 		}
-		fmt.Printf("Read %v bytes from %v, parsing...\n", numRead, peerAddr)
+		// fmt.Printf("Read %v bytes from %v, parsing...\n", numRead, peerAddr)
 
 		// TODO: More versatile check
 		if binary.BigEndian.Uint64(msgBuf) == 0 {
@@ -425,9 +426,8 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			copy(msgBuf, tempBuf)
 		} else {
 			// fmt.Println("Appending to earlier fragment")
-			for i := 0; i < numRead; i++ {
-				msgBuf[msgBufEndIdx+i] = tempBuf[i]
-			}
+			newSection := msgBuf[msgBufEndIdx : msgBufEndIdx+numRead]
+			copy(newSection, tempBuf)
 		}
 
 		msgBufEndIdx += numRead
@@ -460,8 +460,6 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			copy(msgBuf, msgBuf[firstFragmentIdx:])
 			msgBufEndIdx = dataLen
 		}
-
-		fmt.Println()
 	}
 }
 
@@ -630,15 +628,17 @@ func randAvailablePieceIdx(numPieces int, peerBitfield, ourBitfield []byte) (int
 }
 
 func nextAvailablePieceIdx(currBitIdx, numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
-	byteToCheckIdx := (currBitIdx + 1) / 8
+	bitToCheckIdx := currBitIdx + 1
+	byteToCheckIdx := bitToCheckIdx / 8
 	byteToCheck := peerBitfield[byteToCheckIdx]
+	bitsFromLeft := 7 - bitToCheckIdx%8
 
 	attempts := 0
 	for attempts < numPieces {
-		for bitsFromRight := 7; bitsFromRight >= 0; bitsFromRight-- {
+		for bitsFromRight := bitsFromLeft; bitsFromRight >= 0; bitsFromRight-- {
 			mask := byte(1 << bitsFromRight)
-			if byteToCheck&mask == mask && ourBitfield[byteToCheckIdx]&mask == 0 {
-				return currBitIdx + (7 - bitsFromRight), nil
+			if byteToCheck&mask == mask && ourBitfield[byteToCheckIdx]&mask != mask {
+				return byteToCheckIdx*8 + (7 - bitsFromRight), nil
 			}
 			attempts++
 		}
