@@ -19,8 +19,7 @@ A minimalist (read: lacking features) bittorrent client with no dependencies out
 
 ## TODOs
 ### Critical
-- Assemble chunks into pieces
-- Save pieces to disk
+- Check data on disk (resume downloads)
 - Multi-file torrent support
 
 ### Optimizations

@@ -43,7 +43,7 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		// Return to background
+		// TODO: Return to background
 	default:
 		fmt.Println("USAGE: No such subcommand")
 		return
@@ -70,7 +70,10 @@ func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torre
 		return nil, err
 	}
 
-	t := torrent.New(metaInfoFileName, topLevelMap, infoHash)
+	t, err := torrent.New(metaInfoFileName, topLevelMap, infoHash)
+	if err != nil {
+		return nil, err
+	}
 
 	return t, nil
 }

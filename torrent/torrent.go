@@ -16,6 +16,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,7 +32,7 @@ type Torrent struct {
 	infoHash         []byte
 	isPrivate        bool
 	piecesStr        string
-	pieceLength      int
+	pieceLen         int
 	numPieces        int
 	numFiles         int
 	totalSize        int
@@ -39,36 +40,23 @@ type Torrent struct {
 	leechers         int
 	piecesDownloaded int
 	piecesUploaded   int
-	piecesLeft       int
 	bitfield         []byte
+	fileDescs        []*os.File
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 	sync.Mutex
 }
 
-func splitPieceHashes(concatPieceHashes string) []string {
-	numPieces := len(concatPieceHashes) / 20
-	s := make([]string, numPieces)
-
-	j := 0
-	for i := 0; i < numPieces; i++ {
-		hash := concatPieceHashes[j : j+20]
-		s[i] = hash
-		j += 20
-	}
-	return s
-}
-
-func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) *Torrent {
+func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (*Torrent, error) {
 	// Fields common to single-file and multi-file torrents
 	trackerHostname := metaInfoMap["announce"].(string)
 	infoMap := metaInfoMap["info"].(map[string]any)
 
-	pieceLength := infoMap["piece length"].(int)
+	pieceLen := infoMap["piece length"].(int)
 	piecesStr := infoMap["pieces"].(string)
-
 	numPieces := len(piecesStr) / 20
-	bitmaskLen := int(math.Ceil(float64(numPieces) / 8.0))
-	bitmask := make([]byte, bitmaskLen)
+
+	bitfieldLen := int(math.Ceil(float64(numPieces) / 8.0))
+	bitfield := make([]byte, bitfieldLen)
 
 	// Optional common fields
 	comment := ""
@@ -81,40 +69,59 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) *
 		isPrivate = isPrivateEntry.(int)
 	}
 
-	fileMode := ""
+	fileStructure := ""
 	files := infoMap["files"]
 	if files != nil {
-		fileMode = "multiple"
+		fileStructure = "multiple"
 	} else {
-		fileMode = "single"
+		fileStructure = "single"
 	}
 
 	totalSize := 0
 	fileNum := 1
 
-	if fileMode == "multiple" {
+	var filePaths []string
+
+	if fileStructure == "multiple" {
 		files := files.([]any)
 		fileNum = len(files)
 
+		dirName := infoMap["name"].(string)
+		_ = dirName
+
 		for _, v := range files {
-			fileDict := v.(map[string]any)
+			fileMap := v.(map[string]any)
 
-			length := fileDict["length"].(int)
-			totalSize += length
+			fileLength := fileMap["length"].(int)
+			totalSize += fileLength
 
-			pl := fileDict["path"].([]any)
+			pl := fileMap["path"].([]any)
 			var pathList []string
 			for _, v := range pl {
 				pathList = append(pathList, v.(string))
 			}
-			// TODO: Concatenate all files together and then extract piece hashes
-			// fmt.Println(strings.Join(pathList, "/"), length, "bytes")
+
+			// TODO: Concatenate all files together and then split the result into pieces
+			completePath := strings.Join(pathList, "/")
+			filePaths = append(filePaths, completePath)
 		}
-	} else if fileMode == "single" {
-		name := infoMap["name"].(string)
-		_ = name
-		length := infoMap["length"].(int)
-		totalSize += length
+	} else if fileStructure == "single" {
+		fileName := infoMap["name"].(string)
+		filePaths = append(filePaths, fileName)
+		totalSize = infoMap["length"].(int)
+	}
+
+	// TODO: Make sure this doesn't overwrite data if the file already exists
+	// TODO: Use os.DirEntry?
+	// TOOD: If file(s) already exist(s), check its piece hashes and populate t.piecesDownloaded and t.bitfield
+
+	var fileDescs []*os.File
+	for _, fileName := range filePaths {
+		fd, err := os.Create(fileName)
+		if err != nil {
+			return nil, err
+		}
+		fileDescs = append(fileDescs, fd)
 	}
 
 	return &Torrent{
@@ -124,13 +131,17 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) *
 		comment:          comment,
 		isPrivate:        isPrivate == 1,
 		piecesStr:        piecesStr,
-		pieceLength:      pieceLength,
-		numPieces:        totalSize / pieceLength,
+		pieceLen:         pieceLen,
+		numPieces:        totalSize / pieceLen,
 		numFiles:         fileNum,
 		totalSize:        totalSize,
-		piecesLeft:       totalSize,
-		bitfield:         bitmask,
-	}
+		bitfield:         bitfield,
+		fileDescs:        fileDescs,
+	}, nil
+}
+
+func (t *Torrent) IsInProgress() bool {
+	return t.piecesDownloaded > 0 && t.piecesDownloaded < t.numPieces
 }
 
 func (t *Torrent) String() string {
@@ -138,10 +149,8 @@ func (t *Torrent) String() string {
 		fmt.Sprintln("-------------Torrent Info---------------"),
 		fmt.Sprintln("File path:", t.metaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
-		fmt.Sprintf("Hash: % x\n", t.infoHash),
 		fmt.Sprintln("Total size: ", t.totalSize),
 		fmt.Sprintln("# of files: ", t.numFiles),
-		// fmt.Sprintf("Bitmask: %08b\n", t.bitmask),
 	)
 
 	if t.comment != "" {
@@ -164,6 +173,8 @@ One strategy:
 - preallocate enough disk space for entire torrent
 - as each piece comes in, do buffered writes to its offset in the file
 */
+
+const MAX_PEERS = 1
 
 func (t *Torrent) Start() error {
 	myPeerId, myPeerIdBytes := getPeerId()
@@ -206,37 +217,37 @@ func (t *Torrent) Start() error {
 		// TODO: Keep intermittently checking for peers in a separate goroutine
 	}
 
-	errors := make(chan error, 5)
-	done := make(chan struct{}, 5)
+	signalErrors := make(chan error, MAX_PEERS)
+	signalDone := make(chan struct{}, MAX_PEERS)
 
 	// TODO: Maintain N active peers
-	const MAX_PEERS = 2
 	numPeers := 0
 	for numPeers < MAX_PEERS {
-		peer := getNextPeer(peerList)
-		go handleConnection(t, myPeerIdBytes, peer, errors, done)
+		// TODO: Choose more intelligently
+		peer := getRandPeer(peerList)
+		go handleConnection(t, myPeerIdBytes, peer, signalErrors, signalDone)
 		numPeers++
 	}
 
 	for {
 		select {
-		case e := <-errors:
+		case e := <-signalErrors:
 			log.Println("Error caught in start:", e)
 			numPeers--
 
-			peer := getNextPeer(peerList)
-			go handleConnection(t, myPeerIdBytes, peer, errors, done)
+			peer := getRandPeer(peerList)
+			go handleConnection(t, myPeerIdBytes, peer, signalErrors, signalDone)
 			numPeers++
-		case <-done:
-			fmt.Println("Completed in start")
+		case <-signalDone:
+			fmt.Println("Completed", t.metaInfoFileName)
 			numPeers--
+			return nil
 		}
 	}
 	// TODO: Run in background
 }
 
-// TODO: Choose more intelligently
-func getNextPeer(peerList []string) string {
+func getRandPeer(peerList []string) string {
 	return peerList[rand.Intn(len(peerList))]
 }
 
@@ -247,7 +258,7 @@ type pieceData struct {
 	idx  int
 }
 
-func (p pieceData) updateWithCopy(msg peerMessage) {
+func (p *pieceData) updateWithCopy(msg peerMessage) {
 	block := p.data[msg.blockOffset : msg.blockOffset+BLOCK_SIZE]
 	// TODO: Don't copy each block twice
 	copy(block, msg.blockData)
@@ -267,26 +278,31 @@ func (t *Torrent) checkHash(p pieceData) (bool, error) {
 	return string(givenHash) == t.piecesStr[p.idx*20:p.idx*20+20], nil
 }
 
-func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors chan error, done chan struct{}) {
-	parsedMessages := make(chan peerMessage, 5)
-	outboundMsgs := make(chan []byte, 5)
-	go connectAndParse(t.infoHash, myPeerIdBytes, peerAddr, parsedMessages, outboundMsgs, errors, done)
+func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalErrors chan error, signalDone chan struct{}) {
+	parsedMessages := make(chan peerMessage, MAX_PEERS)
+	outboundMsgs := make(chan []byte, MAX_PEERS)
+	defer close(outboundMsgs)
+
+	go connectAndParse(t.infoHash, myPeerIdBytes, peerAddr, parsedMessages, outboundMsgs, signalErrors)
 
 	connState := newConnState()
 
-	bitmaskLen := int(math.Ceil(float64(t.numPieces) / 8.0))
-	peerBitfield := make([]byte, bitmaskLen)
+	bitfieldLen := int(math.Ceil(float64(t.numPieces) / 8.0))
+	peerBitfield := make([]byte, bitfieldLen)
 
-	numBlocks := t.pieceLength / BLOCK_SIZE
+	numBlocks := t.pieceLen / BLOCK_SIZE
 	maxByteOffset := (numBlocks - 1) * BLOCK_SIZE
 
 	byteOffset := 0
-	p := NewPieceData(t.pieceLength)
+	p := NewPieceData(t.pieceLen)
 
 	for {
 		select {
 		case msg := <-parsedMessages:
-			fmt.Println("Parsed a", msg.kind, "from", peerAddr)
+			if msg.kind != fragment {
+				fmt.Println("Parsed a", msg.kind, "from", peerAddr)
+			}
+
 			switch msg.kind {
 			case handshake:
 				fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
@@ -311,8 +327,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 				var err error
 				p.idx, err = randAvailablePieceIdx(t.numPieces, peerBitfield, t.bitfield)
 				if err != nil {
-					errors <- err
-					close(outboundMsgs)
+					signalErrors <- err
 					return
 				}
 
@@ -324,29 +339,53 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 
 				if byteOffset < maxByteOffset { // Incomplete piece
 					byteOffset += BLOCK_SIZE
-					fmt.Println(byteOffset, "/", t.pieceLength, "bytes")
+					fmt.Println(byteOffset, "/", t.pieceLen, "bytes")
 				} else {
-					fmt.Println("Downloaded piece", p.idx, ", checking...")
+					fmt.Println("Completed piece", p.idx, ", checking...")
 					correct, err := t.checkHash(*p)
-					if err != nil || !correct {
-						errors <- err
-						close(outboundMsgs)
+					if err != nil {
+						signalErrors <- err
 						return
 					}
 
+					if !correct {
+						// TODO: Add peer to blacklist
+						err = fmt.Errorf("Piece %v from %v failed hash check", p.idx, peerAddr)
+						signalErrors <- err
+						return
+					}
+
+					t.piecesDownloaded++
 					updateBitfield(&t.bitfield, msg.pieceIdx)
+
 					fmt.Printf("%b\n", t.bitfield)
 
-					p.idx, err = nextAvailablePieceIdx(p.idx, t.numPieces, peerBitfield, t.bitfield)
+					fd := t.getFdForPiece(p)
+					off := int64(p.idx * t.pieceLen)
+
+					_, err = fd.WriteAt(p.data, off)
 					if err != nil {
-						errors <- err
-						close(outboundMsgs)
+						signalErrors <- err
 						return
 					}
-					byteOffset = 0
-					// TODO: Write to disk
 
-					// Do I even need to clear p.data?
+					testPiece := make([]byte, t.pieceLen)
+					_, err = fd.ReadAt(testPiece, off)
+					if err != nil {
+						signalErrors <- err
+						return
+					}
+
+					fileInfo, err := os.Stat(fd.Name())
+					fmt.Println("Wrote", testPiece[:10], "to offset", off, "- file is now", fileInfo.Size(), "bytes")
+
+					byteOffset = 0
+					clear(p.data) // In case we pause in the middle of a piece and want to resume later
+					p.idx, err = nextAvailablePieceIdx(p.idx, t.numPieces, peerBitfield, t.bitfield)
+					if err != nil {
+						signalErrors <- err
+						return
+					}
 				}
 
 				reqMsg := createRequestMsg(p.idx, byteOffset, BLOCK_SIZE)
@@ -359,6 +398,11 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, errors 
 	}
 }
 
+// TODO: Handle multi-file torrents
+func (t *Torrent) getFdForPiece(p *pieceData) *os.File {
+	return t.fileDescs[0]
+}
+
 func updateBitfield(bitfield *[]byte, pieceIdx int) {
 	pieceByteIdx := pieceIdx / 8
 	bitsFromRight := 7 - (pieceIdx % 8)
@@ -367,14 +411,14 @@ func updateBitfield(bitfield *[]byte, pieceIdx int) {
 	*pieceByte |= b
 }
 
-func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMessages chan<- peerMessage, outboundMsgs <-chan []byte, errs chan<- error, done chan<- struct{}) {
-	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13 // Piece message header
+func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMessages chan<- peerMessage, outboundMsgs <-chan []byte, signalErrors chan<- error) {
+	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13 // Include piece message header
 
-	fmt.Println("Connecting to peer", peerAddr, "...")
+	// fmt.Println("Connecting to peer", peerAddr, "...")
 
 	conn, err := net.DialTimeout("tcp", peerAddr, 1*time.Second)
 	if err != nil {
-		errs <- err
+		signalErrors <- err
 		return
 	}
 	defer conn.Close()
@@ -383,7 +427,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 
 	handshakeMsg := createHandshakeMsg(infoHash, myPeerIdBytes)
 	if _, err := conn.Write(handshakeMsg); err != nil {
-		errs <- err
+		signalErrors <- err
 		return
 	}
 
@@ -394,12 +438,12 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 		select {
 		case msg, more := <-outboundMsgs:
 			if !more {
-				log.Println("Handler signaled to drop connection")
+				log.Println("Handler signaled to drop connection to", peerAddr)
 				return
 			}
 
 			if _, err := conn.Write(msg); err != nil {
-				errs <- err
+				signalErrors <- err
 				return
 			}
 		default:
@@ -415,7 +459,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			// fmt.Println("Nothing to read")
 			continue
 		} else if err != nil {
-			errs <- err
+			signalErrors <- err
 			return
 		}
 		// fmt.Printf("Read %v bytes from %v, parsing...\n", numRead, peerAddr)
@@ -435,7 +479,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 		copyToParse := slices.Clone(msgBuf[:msgBufEndIdx]) // Passing a slice of msgBuf to the msg structs causes them to be cleared as well
 		msgList, err := parseMultiMessage(copyToParse, infoHash)
 		if err != nil {
-			errs <- err
+			signalErrors <- err
 			return
 		}
 
@@ -514,7 +558,7 @@ func sendTrackerMessage(t *Torrent, peerId, portForTrackerResponse, event string
 	queryParams.Set("port", portForTrackerResponse)
 	queryParams.Set("uploaded", strconv.Itoa(t.piecesUploaded))
 	queryParams.Set("downloaded", strconv.Itoa(t.piecesDownloaded))
-	queryParams.Set("left", strconv.Itoa(t.piecesLeft))
+	queryParams.Set("left", strconv.Itoa(t.numPieces-t.piecesDownloaded))
 	queryParams.Set("event", event)
 	queryParams.Set("compact", "1")
 	if t.trackerId != "" {
@@ -838,10 +882,4 @@ func (t *Torrent) StoreDownloaded(n int) {
 	t.Lock()
 	defer t.Unlock()
 	t.piecesDownloaded = n
-}
-
-func (t *Torrent) StoreLeft(n int) {
-	t.Lock()
-	defer t.Unlock()
-	t.piecesLeft = n
 }

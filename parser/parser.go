@@ -74,7 +74,7 @@ func New(shouldPrettyPrint bool) parser {
 }
 
 // NOTE: Assumes that the provided file is correctly encoded
-func (p *parser) ParseMetaInfoFile(fileBytes []byte) (topLevelDict map[string]any, infoHash []byte, e error) {
+func (p *parser) ParseMetaInfoFile(fileBytes []byte) (topLevelMap map[string]any, infoHash []byte, e error) {
 	if e = p.bDecode(bytes.NewReader(fileBytes)); e != nil {
 		return
 	}
@@ -100,7 +100,7 @@ func (p *parser) ParseMetaInfoFile(fileBytes []byte) (topLevelDict map[string]an
 		return
 	}
 
-	topLevelDict = p.parseDict()
+	topLevelMap = p.parseDict()
 	return
 }
 
