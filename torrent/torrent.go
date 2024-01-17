@@ -178,7 +178,6 @@ const MAX_PEERS = 1
 
 func (t *Torrent) Start() error {
 	myPeerId, myPeerIdBytes := getPeerId()
-	_ = myPeerIdBytes
 	portForTrackerResponse := getNextFreePort()
 	event := "started" // TODO: Enum
 
@@ -255,7 +254,7 @@ const BLOCK_SIZE = 16 * 1024
 
 type pieceData struct {
 	data []byte
-	idx  int
+	num  int
 }
 
 func (p *pieceData) updateWithCopy(msg peerMessage) {
@@ -275,7 +274,7 @@ func (t *Torrent) checkHash(p pieceData) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return string(givenHash) == t.piecesStr[p.idx*20:p.idx*20+20], nil
+	return string(givenHash) == t.piecesStr[p.num*20:p.num*20+20], nil
 }
 
 func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalErrors chan error, signalDone chan struct{}) {
@@ -325,15 +324,15 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 
 				// Start in a random location
 				var err error
-				p.idx, err = randAvailablePieceIdx(t.numPieces, peerBitfield, t.bitfield)
+				p.num, err = randAvailablePieceIdx(t.numPieces, peerBitfield, t.bitfield)
 				if err != nil {
 					signalErrors <- err
 					return
 				}
 
-				reqMsg := createRequestMsg(p.idx, byteOffset, BLOCK_SIZE)
+				reqMsg := createRequestMsg(p.num, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.idx, byteOffset, peerAddr)
+				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.num, byteOffset, peerAddr)
 			case piece:
 				p.updateWithCopy(msg)
 
@@ -341,16 +340,16 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 					byteOffset += BLOCK_SIZE
 					fmt.Println(byteOffset, "/", t.pieceLen, "bytes")
 				} else {
-					fmt.Println("Completed piece", p.idx, ", checking...")
+					fmt.Println("Completed piece", p.num, ", checking...")
 					correct, err := t.checkHash(*p)
 					if err != nil {
 						signalErrors <- err
 						return
 					}
 
+					// TODO: Add peer to blacklist
 					if !correct {
-						// TODO: Add peer to blacklist
-						err = fmt.Errorf("Piece %v from %v failed hash check", p.idx, peerAddr)
+						err = fmt.Errorf("Piece %v from %v failed hash check", p.num, peerAddr)
 						signalErrors <- err
 						return
 					}
@@ -360,37 +359,43 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 
 					fmt.Printf("%b\n", t.bitfield)
 
-					fd := t.getFdForPiece(p)
-					off := int64(p.idx * t.pieceLen)
-
-					_, err = fd.WriteAt(p.data, off)
+					// fd, err := t.getFdForPiece(p)
+					err = t.savePiece(p)
 					if err != nil {
 						signalErrors <- err
 						return
 					}
 
-					testPiece := make([]byte, t.pieceLen)
-					_, err = fd.ReadAt(testPiece, off)
-					if err != nil {
-						signalErrors <- err
-						return
-					}
+					// off := int64(p.idx * t.pieceLen)
 
-					fileInfo, err := os.Stat(fd.Name())
-					fmt.Println("Wrote", testPiece[:10], "to offset", off, "- file is now", fileInfo.Size(), "bytes")
+					// _, err = fd.WriteAt(p.data, off)
+					// if err != nil {
+					// 	signalErrors <- err
+					// 	return
+					// }
+
+					// testPiece := make([]byte, t.pieceLen)
+					// _, err = fd.ReadAt(testPiece, off)
+					// if err != nil {
+					// 	signalErrors <- err
+					// 	return
+					// }
+
+					// fileInfo, err := os.Stat(fd.Name())
+					// fmt.Println("Wrote", testPiece[:10], "to offset", off, "- file is now", fileInfo.Size(), "bytes")
 
 					byteOffset = 0
 					clear(p.data) // In case we pause in the middle of a piece and want to resume later
-					p.idx, err = nextAvailablePieceIdx(p.idx, t.numPieces, peerBitfield, t.bitfield)
+					p.num, err = nextAvailablePieceIdx(p.num, t.numPieces, peerBitfield, t.bitfield)
 					if err != nil {
 						signalErrors <- err
 						return
 					}
 				}
 
-				reqMsg := createRequestMsg(p.idx, byteOffset, BLOCK_SIZE)
+				reqMsg := createRequestMsg(p.num, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.idx, byteOffset, peerAddr)
+				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.num, byteOffset, peerAddr)
 			case have:
 				updateBitfield(&peerBitfield, msg.pieceIdx)
 			}
@@ -398,9 +403,72 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 	}
 }
 
-// TODO: Handle multi-file torrents
-func (t *Torrent) getFdForPiece(p *pieceData) *os.File {
-	return t.fileDescs[0]
+// TODO: Handle last piece
+func (t *Torrent) savePiece(p *pieceData) error {
+	pieceStartIdx := int64(p.num * t.pieceLen)
+	pieceEndIdx := pieceStartIdx + int64(t.pieceLen)
+
+	if len(t.fileDescs) == 1 {
+		_, err := t.fileDescs[0].WriteAt(p.data, pieceStartIdx)
+		return err
+	}
+
+	//   100 bytes			 200 bytes
+	// 0           100                     300
+	// **************|************************
+	//           PPPPPPPPP
+	// t.pieceLen = 50
+	// pieceStart = 70
+	// boundaryIdx = 30
+
+	// "For the purposes of piece boundaries in the multi-file case, consider the file data
+	// as one long continuous stream, composed of the concatenation of each file in the order
+	// listed in the files list. The number of pieces and their boundaries are then determined
+	// in the same manner as the case of a single file. Pieces may overlap file boundaries."
+
+	fileStartIdx := int64(0)
+	for i := 0; i < len(t.fileDescs)-1; i++ {
+		fd := t.fileDescs[i]
+		nextFd := t.fileDescs[i+1]
+
+		fileInfo, err := os.Stat(fd.Name())
+		if err != nil {
+			return err
+		}
+		fileSize := fileInfo.Size()
+		fileEndIdx := fileStartIdx + fileSize
+
+		nextFileInfo, err := os.Stat(nextFd.Name())
+		if err != nil {
+			return err
+		}
+		nextFileSize := nextFileInfo.Size()
+
+		if pieceStartIdx > fileStartIdx && pieceEndIdx <= fileEndIdx {
+			_, err := fd.WriteAt(p.data, pieceStartIdx)
+			return err
+		} else if pieceStartIdx > fileStartIdx && pieceEndIdx > fileEndIdx {
+			// Piece crosses file boundary
+			boundaryIdx := fileEndIdx - pieceStartIdx
+			leftHalf := p.data[:boundaryIdx]
+			rightHalf := p.data[boundaryIdx:]
+
+			_, err := fd.WriteAt(leftHalf, pieceStartIdx)
+			if err != nil {
+				return err
+			}
+
+			_, err = nextFd.WriteAt(rightHalf, 0)
+			if err != nil {
+				return err
+			}
+		} else if pieceStartIdx > fileStartIdx && pieceEndIdx > fileEndIdx+nextFileSize {
+			panic("Piece is unexpectedly bigger than two whole files, crossing two boundaries")
+		}
+		fileStartIdx += fileSize
+	}
+
+	return nil
 }
 
 func updateBitfield(bitfield *[]byte, pieceIdx int) {
