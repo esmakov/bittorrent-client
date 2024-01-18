@@ -34,16 +34,22 @@ type Torrent struct {
 	piecesStr        string
 	pieceLen         int
 	numPieces        int
-	numFiles         int
 	totalSize        int
 	seeders          int
 	leechers         int
 	piecesDownloaded int
 	piecesUploaded   int
 	bitfield         []byte
-	fileDescs        []*os.File
+	files            []fileInfo
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 	sync.Mutex
+}
+
+type fileInfo struct {
+	name   string
+	path   string
+	length int64
+	fd     *os.File
 }
 
 func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (*Torrent, error) {
@@ -70,58 +76,84 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 	}
 
 	fileStructure := ""
-	files := infoMap["files"]
-	if files != nil {
+	filesList := infoMap["files"]
+	if filesList != nil {
 		fileStructure = "multiple"
 	} else {
 		fileStructure = "single"
 	}
 
 	totalSize := 0
-	fileNum := 1
+	// numFiles := 1
 
-	var filePaths []string
+	// var filePaths []string
+	// var fileNames []string
+	var files []fileInfo
+	var dirName string
 
 	if fileStructure == "multiple" {
-		files := files.([]any)
-		fileNum = len(files)
+		fl := filesList.([]any)
+		// numFiles = len(files)
 
-		dirName := infoMap["name"].(string)
-		_ = dirName
+		dirName = infoMap["name"].(string)
 
-		for _, v := range files {
-			fileMap := v.(map[string]any)
+		for _, e := range fl {
+			fileMap := e.(map[string]any)
 
 			fileLength := fileMap["length"].(int)
 			totalSize += fileLength
 
-			pl := fileMap["path"].([]any)
-			var pathList []string
-			for _, v := range pl {
-				pathList = append(pathList, v.(string))
-			}
+			pathList := fileMap["path"].([]any)
 
-			// TODO: Concatenate all files together and then split the result into pieces
-			completePath := strings.Join(pathList, "/")
-			filePaths = append(filePaths, completePath)
+			var pathSegments []string
+			for _, f := range pathList {
+				pathSegments = append(pathSegments, f.(string))
+			}
+			completePath := strings.Join(pathSegments, string(os.PathSeparator))
+
+			files = append(files, fileInfo{
+				name:   pathList[len(pathList)-1].(string),
+				path:   completePath,
+				length: int64(fileLength),
+			})
 		}
 	} else if fileStructure == "single" {
-		fileName := infoMap["name"].(string)
-		filePaths = append(filePaths, fileName)
+		f := infoMap["name"].(string)
 		totalSize = infoMap["length"].(int)
+		files = append(files, fileInfo{
+			name:   f,
+			path:   f,
+			length: int64(totalSize),
+		})
 	}
 
 	// TODO: Make sure this doesn't overwrite data if the file already exists
 	// TODO: Use os.DirEntry?
 	// TOOD: If file(s) already exist(s), check its piece hashes and populate t.piecesDownloaded and t.bitfield
-
-	var fileDescs []*os.File
-	for _, fileName := range filePaths {
-		fd, err := os.Create(fileName)
+	if dirName != "" {
+		os.Mkdir(dirName, 0766)
+	}
+	// var fileDescs []*os.File
+	// for _, fp := range filePaths {
+	// 	fmt.Println(dirName + fp)
+	// 	if dirName != "" {
+	// 		fp = dirName + "/" + fp
+	// 	}
+	// 	fd, err := os.Create(fp)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	fileDescs = append(fileDescs, fd)
+	// }
+	for _, f := range files {
+		if dirName != "" {
+			f.path = dirName + string(os.PathSeparator) + f.path
+		}
+		fd, err := os.Create(f.path)
 		if err != nil {
 			return nil, err
 		}
-		fileDescs = append(fileDescs, fd)
+		f.fd = fd
 	}
 
 	return &Torrent{
@@ -133,10 +165,9 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 		piecesStr:        piecesStr,
 		pieceLen:         pieceLen,
 		numPieces:        totalSize / pieceLen,
-		numFiles:         fileNum,
 		totalSize:        totalSize,
 		bitfield:         bitfield,
-		fileDescs:        fileDescs,
+		files:            files,
 	}, nil
 }
 
@@ -150,8 +181,12 @@ func (t *Torrent) String() string {
 		fmt.Sprintln("File path:", t.metaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
 		fmt.Sprintln("Total size: ", t.totalSize),
-		fmt.Sprintln("# of files: ", t.numFiles),
+		fmt.Sprintf("%v file(s): \n", len(t.files)),
 	)
+
+	for _, file := range t.files {
+		str += fmt.Sprintf("  %v\n", file.name)
+	}
 
 	if t.comment != "" {
 		str += fmt.Sprint("Comment:", t.comment)
@@ -332,7 +367,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 
 				reqMsg := createRequestMsg(p.num, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.num, byteOffset, peerAddr)
+				fmt.Printf("Sent request for piece %v/%v with block offset %v to %v\n", p.num, t.numPieces, byteOffset, peerAddr)
 			case piece:
 				p.updateWithCopy(msg)
 
@@ -395,7 +430,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 
 				reqMsg := createRequestMsg(p.num, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Sent request for piece %v with block offset %v to %v\n", p.num, byteOffset, peerAddr)
+				fmt.Printf("Sent request for piece %v/%v with block offset %v to %v\n", p.num, t.numPieces, byteOffset, peerAddr)
 			case have:
 				updateBitfield(&peerBitfield, msg.pieceIdx)
 			}
@@ -408,8 +443,8 @@ func (t *Torrent) savePiece(p *pieceData) error {
 	pieceStartIdx := int64(p.num * t.pieceLen)
 	pieceEndIdx := pieceStartIdx + int64(t.pieceLen)
 
-	if len(t.fileDescs) == 1 {
-		_, err := t.fileDescs[0].WriteAt(p.data, pieceStartIdx)
+	if len(t.files) == 1 {
+		_, err := t.files[0].fd.WriteAt(p.data, pieceStartIdx)
 		return err
 	}
 
@@ -427,33 +462,44 @@ func (t *Torrent) savePiece(p *pieceData) error {
 	// in the same manner as the case of a single file. Pieces may overlap file boundaries."
 
 	fileStartIdx := int64(0)
-	for i := 0; i < len(t.fileDescs)-1; i++ {
-		fd := t.fileDescs[i]
-		nextFd := t.fileDescs[i+1]
+	for i := 0; i < len(t.files); i++ {
+		currFile := t.files[i]
+		currFd := currFile.fd
+		fmt.Println("Seeing if piece belongs in", currFd.Name())
+		// fileInfo, err := os.Stat(fd.Name())
+		// if err != nil {
+		// 	return err
+		// }
+		// fileSize := fileInfo.Size() - nice, great idea
+		fileEndIdx := fileStartIdx + currFile.length
 
-		fileInfo, err := os.Stat(fd.Name())
-		if err != nil {
-			return err
-		}
-		fileSize := fileInfo.Size()
-		fileEndIdx := fileStartIdx + fileSize
+		// nextFileInfo, err := os.Stat(nextFd.Name())
+		// if err != nil {
+		// 	return err
+		// }
+		// nextFileSize := nextFileInfo.Size()
+		// nextFileEndIdx := fileEndIdx + nextFileSize
 
-		nextFileInfo, err := os.Stat(nextFd.Name())
-		if err != nil {
+		if pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx {
+			_, err := currFd.WriteAt(p.data, pieceStartIdx)
+			fmt.Println("PIECE SAVED", currFd.Name())
 			return err
-		}
-		nextFileSize := nextFileInfo.Size()
-
-		if pieceStartIdx > fileStartIdx && pieceEndIdx <= fileEndIdx {
-			_, err := fd.WriteAt(p.data, pieceStartIdx)
-			return err
-		} else if pieceStartIdx > fileStartIdx && pieceEndIdx > fileEndIdx {
+		} else if pieceStartIdx >= fileEndIdx {
+			fileStartIdx += currFile.length
+			fmt.Println(pieceStartIdx, fileEndIdx)
+			fmt.Println("Piece belongs in next file")
+			// } else if pieceStartIdx > fileStartIdx && pieceEndIdx > fileEndIdx {
+		} else {
 			// Piece crosses file boundary
+			fmt.Println("Piece crosses file boundary")
+			nextFile := t.files[i+1]
+			nextFd := nextFile.fd
+
 			boundaryIdx := fileEndIdx - pieceStartIdx
 			leftHalf := p.data[:boundaryIdx]
 			rightHalf := p.data[boundaryIdx:]
 
-			_, err := fd.WriteAt(leftHalf, pieceStartIdx)
+			_, err := currFd.WriteAt(leftHalf, pieceStartIdx)
 			if err != nil {
 				return err
 			}
@@ -462,10 +508,9 @@ func (t *Torrent) savePiece(p *pieceData) error {
 			if err != nil {
 				return err
 			}
-		} else if pieceStartIdx > fileStartIdx && pieceEndIdx > fileEndIdx+nextFileSize {
-			panic("Piece is unexpectedly bigger than two whole files, crossing two boundaries")
+
+			return nil
 		}
-		fileStartIdx += fileSize
 	}
 
 	return nil

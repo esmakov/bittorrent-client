@@ -12,26 +12,39 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("USAGE: bittorrent-client add [*.torrent]")
+		fmt.Println("USAGE: bittorrent-client [command] [*.torrent]")
 		os.Exit(1)
 	}
 
 	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
-	printParseTree := addCmd.Bool("print", false, "Pretty print the metainfo file parse tree")
+	treeCmd := flag.NewFlagSet("tree", flag.ExitOnError)
+	// printParseTree := addCmd.Bool("print", false, "Pretty print the metainfo file parse tree")
+
+	if len(os.Args) < 3 {
+		fmt.Println("USAGE: [command] [.torrent]")
+		return
+	}
+	metaInfoFileName := os.Args[2]
 
 	switch os.Args[1] {
-	case "add":
-		if len(os.Args) < 3 {
-			fmt.Println("USAGE: add [.torrent]")
+	case "tree":
+		if err := treeCmd.Parse(os.Args[3:]); err != nil {
+			fmt.Println(err)
 			return
 		}
-		metaInfoFileName := os.Args[2]
+
+		_, err := addTorrent(metaInfoFileName, true)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+	case "add":
 		if err := addCmd.Parse(os.Args[3:]); err != nil {
 			fmt.Println(err)
 			return
 		}
 
-		t, err := addTorrent(metaInfoFileName, *printParseTree)
+		t, err := addTorrent(metaInfoFileName, false)
 		if err != nil {
 			fmt.Println(err)
 			return
