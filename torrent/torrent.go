@@ -40,7 +40,7 @@ type Torrent struct {
 	piecesDownloaded int
 	piecesUploaded   int
 	bitfield         []byte
-	files            []fileInfo
+	files            []*fileInfo
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 	sync.Mutex
 }
@@ -84,16 +84,12 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 	}
 
 	totalSize := 0
-	// numFiles := 1
 
-	// var filePaths []string
-	// var fileNames []string
-	var files []fileInfo
+	var files []*fileInfo
 	var dirName string
 
 	if fileStructure == "multiple" {
 		fl := filesList.([]any)
-		// numFiles = len(files)
 
 		dirName = infoMap["name"].(string)
 
@@ -111,7 +107,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 			}
 			completePath := strings.Join(pathSegments, string(os.PathSeparator))
 
-			files = append(files, fileInfo{
+			files = append(files, &fileInfo{
 				name:   pathList[len(pathList)-1].(string),
 				path:   completePath,
 				length: int64(fileLength),
@@ -120,7 +116,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 	} else if fileStructure == "single" {
 		f := infoMap["name"].(string)
 		totalSize = infoMap["length"].(int)
-		files = append(files, fileInfo{
+		files = append(files, &fileInfo{
 			name:   f,
 			path:   f,
 			length: int64(totalSize),
@@ -128,23 +124,10 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 	}
 
 	// TODO: Make sure this doesn't overwrite data if the file already exists
-	// TODO: Use os.DirEntry?
 	// TOOD: If file(s) already exist(s), check its piece hashes and populate t.piecesDownloaded and t.bitfield
 	if dirName != "" {
 		os.Mkdir(dirName, 0766)
 	}
-	// var fileDescs []*os.File
-	// for _, fp := range filePaths {
-	// 	fmt.Println(dirName + fp)
-	// 	if dirName != "" {
-	// 		fp = dirName + "/" + fp
-	// 	}
-	// 	fd, err := os.Create(fp)
-	// 	if err != nil {
-	// 		return nil, err
-	// 	}
-	// 	fileDescs = append(fileDescs, fd)
-	// }
 	for _, f := range files {
 		if dirName != "" {
 			f.path = dirName + string(os.PathSeparator) + f.path
@@ -154,7 +137,9 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 			return nil, err
 		}
 		f.fd = fd
+		fmt.Println(f)
 	}
+	fmt.Println(files)
 
 	return &Torrent{
 		metaInfoFileName: metaInfoFileName,
@@ -176,38 +161,25 @@ func (t *Torrent) IsInProgress() bool {
 }
 
 func (t *Torrent) String() string {
+	sb := strings.Builder{}
 	str := fmt.Sprint(
 		fmt.Sprintln("-------------Torrent Info---------------"),
-		fmt.Sprintln("File path:", t.metaInfoFileName),
+		fmt.Sprintln("Torrent file:", t.metaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
 		fmt.Sprintln("Total size: ", t.totalSize),
 		fmt.Sprintf("%v file(s): \n", len(t.files)),
 	)
 
+	sb.WriteString(str)
 	for _, file := range t.files {
-		str += fmt.Sprintf("  %v\n", file.name)
+		sb.WriteString(fmt.Sprintf("  %v\n", file.name))
 	}
 
 	if t.comment != "" {
-		str += fmt.Sprint("Comment:", t.comment)
+		sb.WriteString(fmt.Sprint("Comment:", t.comment))
 	}
-	str += "\n"
-	return str
+	return sb.String()
 }
-
-/*
-One goroutine has to listen for incoming connections on the port we announced to tracker
-
-Another goroutine has to keep talking to the tracker
-
-Want to write each piece to disk as it completes, but:
-- pieces may be out of order
-- pieces may cross file boundaries
-- can't store all pieces in memory at same time
-One strategy:
-- preallocate enough disk space for entire torrent
-- as each piece comes in, do buffered writes to its offset in the file
-*/
 
 const MAX_PEERS = 1
 
@@ -254,7 +226,11 @@ func (t *Torrent) Start() error {
 	signalErrors := make(chan error, MAX_PEERS)
 	signalDone := make(chan struct{}, MAX_PEERS)
 
-	// TODO: Maintain N active peers
+	// TODO:
+	// Maintain N active peers
+	// One goroutine has to listen for incoming connections on the port we announced to tracker
+	// Another goroutine has to keep talking to the tracker
+
 	numPeers := 0
 	for numPeers < MAX_PEERS {
 		// TODO: Choose more intelligently
@@ -299,7 +275,6 @@ func (p *pieceData) updateWithCopy(msg peerMessage) {
 }
 
 func NewPieceData(pieceLength int) *pieceData {
-	// Pre-allocate enough to store an entire piece worth of blocks sequentially
 	data := make([]byte, pieceLength)
 	return &pieceData{data: data}
 }
@@ -357,7 +332,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 				outboundMsgs <- unchokeMsg
 				fmt.Printf("Sending unchoke to %v\n", peerAddr)
 
-				// Start in a random location
+				// Start wherever for now
 				var err error
 				p.num, err = randAvailablePieceIdx(t.numPieces, peerBitfield, t.bitfield)
 				if err != nil {
@@ -367,7 +342,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 
 				reqMsg := createRequestMsg(p.num, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Sent request for piece %v/%v with block offset %v to %v\n", p.num, t.numPieces, byteOffset, peerAddr)
+				fmt.Printf("Requesting piece %v/%v from %v\n", p.num, t.numPieces, peerAddr)
 			case piece:
 				p.updateWithCopy(msg)
 
@@ -394,33 +369,14 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 
 					fmt.Printf("%b\n", t.bitfield)
 
-					// fd, err := t.getFdForPiece(p)
 					err = t.savePiece(p)
 					if err != nil {
 						signalErrors <- err
 						return
 					}
 
-					// off := int64(p.idx * t.pieceLen)
-
-					// _, err = fd.WriteAt(p.data, off)
-					// if err != nil {
-					// 	signalErrors <- err
-					// 	return
-					// }
-
-					// testPiece := make([]byte, t.pieceLen)
-					// _, err = fd.ReadAt(testPiece, off)
-					// if err != nil {
-					// 	signalErrors <- err
-					// 	return
-					// }
-
-					// fileInfo, err := os.Stat(fd.Name())
-					// fmt.Println("Wrote", testPiece[:10], "to offset", off, "- file is now", fileInfo.Size(), "bytes")
-
 					byteOffset = 0
-					clear(p.data) // In case we pause in the middle of a piece and want to resume later
+					clear(p.data) // In case we pause in the middle of a piece
 					p.num, err = nextAvailablePieceIdx(p.num, t.numPieces, peerBitfield, t.bitfield)
 					if err != nil {
 						signalErrors <- err
@@ -430,7 +386,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 
 				reqMsg := createRequestMsg(p.num, byteOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Sent request for piece %v/%v with block offset %v to %v\n", p.num, t.numPieces, byteOffset, peerAddr)
+				fmt.Printf("Requesting piece %v/%v from %v\n", p.num, t.numPieces, peerAddr)
 			case have:
 				updateBitfield(&peerBitfield, msg.pieceIdx)
 			}
@@ -448,14 +404,6 @@ func (t *Torrent) savePiece(p *pieceData) error {
 		return err
 	}
 
-	//   100 bytes			 200 bytes
-	// 0           100                     300
-	// **************|************************
-	//           PPPPPPPPP
-	// t.pieceLen = 50
-	// pieceStart = 70
-	// boundaryIdx = 30
-
 	// "For the purposes of piece boundaries in the multi-file case, consider the file data
 	// as one long continuous stream, composed of the concatenation of each file in the order
 	// listed in the files list. The number of pieces and their boundaries are then determined
@@ -465,33 +413,20 @@ func (t *Torrent) savePiece(p *pieceData) error {
 	for i := 0; i < len(t.files); i++ {
 		currFile := t.files[i]
 		currFd := currFile.fd
-		fmt.Println("Seeing if piece belongs in", currFd.Name())
-		// fileInfo, err := os.Stat(fd.Name())
-		// if err != nil {
-		// 	return err
-		// }
-		// fileSize := fileInfo.Size() - nice, great idea
+		// fmt.Println("Seeing if piece belongs in", currFd.Name())
 		fileEndIdx := fileStartIdx + currFile.length
-
-		// nextFileInfo, err := os.Stat(nextFd.Name())
-		// if err != nil {
-		// 	return err
-		// }
-		// nextFileSize := nextFileInfo.Size()
-		// nextFileEndIdx := fileEndIdx + nextFileSize
 
 		if pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx {
 			_, err := currFd.WriteAt(p.data, pieceStartIdx)
-			fmt.Println("PIECE SAVED", currFd.Name())
+			// fmt.Println("PIECE SAVED", currFd.Name())
 			return err
 		} else if pieceStartIdx >= fileEndIdx {
 			fileStartIdx += currFile.length
-			fmt.Println(pieceStartIdx, fileEndIdx)
-			fmt.Println("Piece belongs in next file")
+			// fmt.Println(pieceStartIdx, fileEndIdx)
+			// fmt.Println("Piece belongs in next file")
 			// } else if pieceStartIdx > fileStartIdx && pieceEndIdx > fileEndIdx {
 		} else {
-			// Piece crosses file boundary
-			fmt.Println("Piece crosses file boundary")
+			// fmt.Println("Piece crosses file boundary")
 			nextFile := t.files[i+1]
 			nextFd := nextFile.fd
 
@@ -527,8 +462,6 @@ func updateBitfield(bitfield *[]byte, pieceIdx int) {
 func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMessages chan<- peerMessage, outboundMsgs <-chan []byte, signalErrors chan<- error) {
 	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13 // Include piece message header
 
-	// fmt.Println("Connecting to peer", peerAddr, "...")
-
 	conn, err := net.DialTimeout("tcp", peerAddr, 1*time.Second)
 	if err != nil {
 		signalErrors <- err
@@ -536,7 +469,7 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 	}
 	defer conn.Close()
 
-	fmt.Println("Connected to peer", peerAddr)
+	log.Println("Connected to peer", peerAddr)
 
 	handshakeMsg := createHandshakeMsg(infoHash, myPeerIdBytes)
 	if _, err := conn.Write(handshakeMsg); err != nil {
@@ -575,7 +508,6 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			signalErrors <- err
 			return
 		}
-		// fmt.Printf("Read %v bytes from %v, parsing...\n", numRead, peerAddr)
 
 		// TODO: More versatile check
 		if binary.BigEndian.Uint64(msgBuf) == 0 {
@@ -589,7 +521,8 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 
 		msgBufEndIdx += numRead
 
-		copyToParse := slices.Clone(msgBuf[:msgBufEndIdx]) // Passing a slice of msgBuf to the msg structs causes them to be cleared as well
+		// Passing a slice of msgBuf to the parser would create msg structs that get cleared too
+		copyToParse := slices.Clone(msgBuf[:msgBufEndIdx])
 		msgList, err := parseMultiMessage(copyToParse, infoHash)
 		if err != nil {
 			signalErrors <- err
@@ -613,9 +546,8 @@ func connectAndParse(infoHash, myPeerIdBytes []byte, peerAddr string, parsedMess
 			msgBufEndIdx = 0
 		} else if firstFragmentIdx != 0 {
 			// Copy over leading 0s
-			dataLen := msgBufEndIdx - firstFragmentIdx
 			copy(msgBuf, msgBuf[firstFragmentIdx:])
-			msgBufEndIdx = dataLen
+			msgBufEndIdx = msgBufEndIdx - firstFragmentIdx
 		}
 	}
 }
@@ -627,12 +559,13 @@ func getPeerId() (string, []byte) {
 	return peerId, peerIdBytes
 }
 
+// TODO: Do I need more than one?
 func getNextFreePort() string {
 	return "6881"
 }
 
-// <pstrlen><pstr><reserved><info_hash><peer_id>
 func createHandshakeMsg(infoHash []byte, peerId []byte) []byte {
+	// <pstrlen><pstr><reserved><info_hash><peer_id>
 	protocol := "BitTorrent protocol"
 	protocolBytes := make([]byte, len(protocol))
 	copy(protocolBytes, protocol)

@@ -18,7 +18,6 @@ func main() {
 
 	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
 	treeCmd := flag.NewFlagSet("tree", flag.ExitOnError)
-	// printParseTree := addCmd.Bool("print", false, "Pretty print the metainfo file parse tree")
 
 	if len(os.Args) < 3 {
 		fmt.Println("USAGE: [command] [.torrent]")
@@ -56,7 +55,6 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		// TODO: Return to background
 	default:
 		fmt.Println("USAGE: No such subcommand")
 		return

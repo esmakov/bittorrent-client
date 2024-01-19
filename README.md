@@ -1,17 +1,19 @@
-A minimalist (read: lacking features) bittorrent client with no dependencies outside the Go standard library.
+A minimal bittorrent client with no dependencies outside the Go standard library.
 
 # Usage
 `go build`
 
-`./bittorrent-client add [path to .torrent file]`
+`./bittorrent-client [command] [path to .torrent file]`
 
-## Command line options
-`-print` to print parse tree of .torrent file
+## Commands
+- add: Create files needed for torrent and start downloading
+- tree: Pretty-print the parse tree of the .torrent file
 
 ## Features
-- Parses bencoded metainfo (.torrent) files and bencoded tracker responses
-- Parses [peer message format](https://wiki.theory.org/BitTorrentSpecification#Messages)
+- Parses bencoding used in .torrent files and tracker responses
 - Supports bencoding structured data for serialization
+- Parses [peer message format](https://wiki.theory.org/BitTorrentSpecification#Messages)
+- Download single or multi-file torrents
 
 ### Supported BEPs
 - 3: Basic BitTorrent protocol (in progress)
@@ -19,8 +21,7 @@ A minimalist (read: lacking features) bittorrent client with no dependencies out
 
 ## TODOs
 ### Critical
-- Check data on disk (resume downloads)
-- Multi-file torrent support
+- Check for data on disk when adding torrent
 
 ### Optimizations
 - Better piece download strategies (rarest first)
