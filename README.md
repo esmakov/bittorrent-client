@@ -13,7 +13,8 @@ A minimal bittorrent client with no dependencies outside the Go standard library
 - Parses bencoding used in .torrent files and tracker responses
 - Supports bencoding structured data for serialization
 - Parses [peer message format](https://wiki.theory.org/BitTorrentSpecification#Messages)
-- Download single or multi-file torrents
+- Downloads single or multi-file torrents
+- Checks existing data on disk and picks up from where you left off
 
 ### Supported BEPs
 - 3: Basic BitTorrent protocol (in progress)
@@ -21,7 +22,6 @@ A minimal bittorrent client with no dependencies outside the Go standard library
 
 ## TODOs
 ### Critical
-- Check for data on disk when adding torrent
 
 ### Optimizations
 - Better piece download strategies (rarest first)
@@ -29,4 +29,4 @@ A minimal bittorrent client with no dependencies outside the Go standard library
 
 ### Completeness
 - More subcommands: remove, pause/resume
-- Support the dictionary model for tracker responses listing available peers
+- Support the (so-far-unseen) dictionary model for tracker responses listing available peers

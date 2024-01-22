@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"math/rand"
@@ -46,10 +47,9 @@ type Torrent struct {
 }
 
 type fileInfo struct {
-	name   string
-	path   string
-	length int64
-	fd     *os.File
+	path        string
+	finalLength int64
+	fd          *os.File
 }
 
 func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (*Torrent, error) {
@@ -108,23 +108,21 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 			completePath := strings.Join(pathSegments, string(os.PathSeparator))
 
 			files = append(files, &fileInfo{
-				name:   pathList[len(pathList)-1].(string),
-				path:   completePath,
-				length: int64(fileLength),
+				path:        completePath,
+				finalLength: int64(fileLength),
 			})
 		}
 	} else if fileStructure == "single" {
 		f := infoMap["name"].(string)
 		totalSize = infoMap["length"].(int)
 		files = append(files, &fileInfo{
-			name:   f,
-			path:   f,
-			length: int64(totalSize),
+			path:        f,
+			finalLength: int64(totalSize),
 		})
 	}
 
-	// TODO: Make sure this doesn't overwrite data if the file already exists
-	// TOOD: If file(s) already exist(s), check its piece hashes and populate t.piecesDownloaded and t.bitfield
+	piecesDownloaded := 0
+	var filesToCheck []*fileInfo
 	if dirName != "" {
 		os.Mkdir(dirName, 0766)
 	}
@@ -132,14 +130,33 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 		if dirName != "" {
 			f.path = dirName + string(os.PathSeparator) + f.path
 		}
-		fd, err := os.Create(f.path)
-		if err != nil {
+
+		fd, err := os.OpenFile(f.path, os.O_RDWR, 0)
+		if errors.Is(err, fs.ErrNotExist) {
+			fd, err = os.Create(f.path)
+			if err != nil {
+				return nil, err
+			}
+			f.fd = fd
+		} else if err != nil {
 			return nil, err
+		} else {
+			f.fd = fd
+			filesToCheck = append(filesToCheck, f)
 		}
-		f.fd = fd
-		fmt.Println(f)
 	}
-	fmt.Println(files)
+
+	pieceNums, err := checkPiecesOnDisk(filesToCheck, pieceLen, numPieces, piecesStr)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, v := range pieceNums {
+		updateBitfield(&bitfield, v)
+		piecesDownloaded++
+	}
+
+	fmt.Println(bitfield)
 
 	return &Torrent{
 		metaInfoFileName: metaInfoFileName,
@@ -149,11 +166,88 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 		isPrivate:        isPrivate == 1,
 		piecesStr:        piecesStr,
 		pieceLen:         pieceLen,
-		numPieces:        totalSize / pieceLen,
+		numPieces:        numPieces,
+		piecesDownloaded: piecesDownloaded,
 		totalSize:        totalSize,
 		bitfield:         bitfield,
 		files:            files,
 	}, nil
+}
+
+func checkPiecesOnDisk(files []*fileInfo, pieceLen, numPieces int, piecesStr string) ([]int, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	p := NewPieceData(pieceLen)
+	var pieceNums []int
+	offset := int64(0)
+	fileEndIdx := int64(0)
+
+	for _, f := range files {
+		fileEndIdx += f.finalLength
+
+		fi, err := os.Stat(f.path)
+		if err != nil {
+			return nil, err
+		}
+		if fi.Size() == 0 {
+			continue
+		}
+
+		for {
+			isIncomplete := fi.Size() < f.finalLength
+			stopPoint := max(fi.Size(), fileEndIdx)
+			if isIncomplete {
+				if offset >= fi.Size() {
+					break
+				}
+			} else {
+				if offset >= stopPoint {
+					break
+				}
+			}
+
+			bytesFromEnd := fileEndIdx - offset
+
+			readSize := math.MaxInt
+			limits := []int{pieceLen, int(f.finalLength), int(bytesFromEnd)}
+			for _, v := range limits {
+				if v < readSize {
+					readSize = v
+				}
+			}
+			if readSize < pieceLen {
+				fmt.Printf("Will read only %v bytes\n", readSize)
+				p.data = p.data[:readSize]
+				fmt.Println(len(p.data))
+			}
+
+			_, err := f.fd.ReadAt(p.data, offset)
+			if err != nil {
+				return nil, err
+			}
+
+			if binary.BigEndian.Uint64(p.data) != 0 {
+				correct, err := checkPieceHash(*p, piecesStr)
+				if err != nil {
+					return nil, err
+				}
+
+				if correct {
+					// fmt.Printf("Piece %v checked successfully\n", p.num)
+					pieceNums = append(pieceNums, p.num)
+				} else {
+					return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
+				}
+			}
+
+			clear(p.data) // Necessary?
+			p.num++
+			offset += int64(pieceLen)
+		}
+	}
+	return pieceNums, nil
 }
 
 func (t *Torrent) IsInProgress() bool {
@@ -172,7 +266,7 @@ func (t *Torrent) String() string {
 
 	sb.WriteString(str)
 	for _, file := range t.files {
-		sb.WriteString(fmt.Sprintf("  %v\n", file.name))
+		sb.WriteString(fmt.Sprintf("  %v\n", file.fd.Name()))
 	}
 
 	if t.comment != "" {
@@ -206,11 +300,11 @@ func (t *Torrent) Start() error {
 	}
 
 	if numSeeders, ok := trackerResponse["complete"]; ok {
-		t.StoreSeeders(numSeeders.(int))
+		t.storeSeeders(numSeeders.(int))
 	}
 
 	if numLeechers, ok := trackerResponse["incomplete"]; ok {
-		t.StoreLeechers(numLeechers.(int))
+		t.storeLeechers(numLeechers.(int))
 	}
 
 	peersStr := trackerResponse["peers"].(string)
@@ -264,8 +358,13 @@ func getRandPeer(peerList []string) string {
 const BLOCK_SIZE = 16 * 1024
 
 type pieceData struct {
-	data []byte
 	num  int
+	data []byte
+}
+
+func NewPieceData(pieceLen int) *pieceData {
+	data := make([]byte, pieceLen)
+	return &pieceData{data: data}
 }
 
 func (p *pieceData) updateWithCopy(msg peerMessage) {
@@ -274,17 +373,12 @@ func (p *pieceData) updateWithCopy(msg peerMessage) {
 	copy(block, msg.blockData)
 }
 
-func NewPieceData(pieceLength int) *pieceData {
-	data := make([]byte, pieceLength)
-	return &pieceData{data: data}
-}
-
-func (t *Torrent) checkHash(p pieceData) (bool, error) {
+func checkPieceHash(p pieceData, piecesStr string) (bool, error) {
 	givenHash, err := hash.HashSHA1(p.data)
 	if err != nil {
 		return false, err
 	}
-	return string(givenHash) == t.piecesStr[p.num*20:p.num*20+20], nil
+	return string(givenHash) == piecesStr[p.num*20:p.num*20+20], nil
 }
 
 func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalErrors chan error, signalDone chan struct{}) {
@@ -350,8 +444,8 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 					byteOffset += BLOCK_SIZE
 					fmt.Println(byteOffset, "/", t.pieceLen, "bytes")
 				} else {
-					fmt.Println("Completed piece", p.num, ", checking...")
-					correct, err := t.checkHash(*p)
+					fmt.Printf("Completed piece %v, checking...\n", p.num)
+					correct, err := checkPieceHash(*p, t.piecesStr)
 					if err != nil {
 						signalErrors <- err
 						return
@@ -364,7 +458,7 @@ func handleConnection(t *Torrent, myPeerIdBytes []byte, peerAddr string, signalE
 						return
 					}
 
-					t.piecesDownloaded++
+					t.storeDownloaded(t.piecesDownloaded + 1)
 					updateBitfield(&t.bitfield, msg.pieceIdx)
 
 					fmt.Printf("%b\n", t.bitfield)
@@ -410,19 +504,18 @@ func (t *Torrent) savePiece(p *pieceData) error {
 	// in the same manner as the case of a single file. Pieces may overlap file boundaries."
 
 	fileStartIdx := int64(0)
+
 	for i := 0; i < len(t.files); i++ {
 		currFile := t.files[i]
 		currFd := currFile.fd
-		// fmt.Println("Seeing if piece belongs in", currFd.Name())
-		fileEndIdx := fileStartIdx + currFile.length
+		fileEndIdx := fileStartIdx + currFile.finalLength
 
 		if pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx {
 			_, err := currFd.WriteAt(p.data, pieceStartIdx)
 			// fmt.Println("PIECE SAVED", currFd.Name())
 			return err
 		} else if pieceStartIdx >= fileEndIdx {
-			fileStartIdx += currFile.length
-			// fmt.Println(pieceStartIdx, fileEndIdx)
+			fileStartIdx += currFile.finalLength
 			// fmt.Println("Piece belongs in next file")
 			// } else if pieceStartIdx > fileStartIdx && pieceEndIdx > fileEndIdx {
 		} else {
@@ -451,9 +544,9 @@ func (t *Torrent) savePiece(p *pieceData) error {
 	return nil
 }
 
-func updateBitfield(bitfield *[]byte, pieceIdx int) {
-	pieceByteIdx := pieceIdx / 8
-	bitsFromRight := 7 - (pieceIdx % 8)
+func updateBitfield(bitfield *[]byte, pieceNum int) {
+	pieceByteIdx := pieceNum / 8
+	bitsFromRight := 7 - (pieceNum % 8)
 	pieceByte := &((*bitfield)[pieceByteIdx])
 	b := uint8(0x01) << bitsFromRight
 	*pieceByte |= b
@@ -906,25 +999,25 @@ func parseAndVerifyHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, 
 	return msg, nil
 }
 
-func (t *Torrent) StoreSeeders(n int) {
+func (t *Torrent) storeSeeders(n int) {
 	t.Lock()
 	defer t.Unlock()
 	t.seeders = n
 }
 
-func (t *Torrent) StoreLeechers(n int) {
+func (t *Torrent) storeLeechers(n int) {
 	t.Lock()
 	defer t.Unlock()
 	t.leechers = n
 }
 
-func (t *Torrent) StoreUploaded(n int) {
+func (t *Torrent) storeUploaded(n int) {
 	t.Lock()
 	defer t.Unlock()
 	t.piecesUploaded = n
 }
 
-func (t *Torrent) StoreDownloaded(n int) {
+func (t *Torrent) storeDownloaded(n int) {
 	t.Lock()
 	defer t.Unlock()
 	t.piecesDownloaded = n
