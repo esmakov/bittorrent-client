@@ -1,4 +1,5 @@
 A minimal bittorrent client with no dependencies outside the Go standard library.
+Made purely as a learning project, use at your own risk.
 
 # Usage
 `go build`
@@ -22,6 +23,8 @@ A minimal bittorrent client with no dependencies outside the Go standard library
 
 ## TODOs
 ### Critical
+- Respond to piece requests
+- Send "completed" event to tracker
 
 ### Optimizations
 - Better piece download strategies (rarest first)
