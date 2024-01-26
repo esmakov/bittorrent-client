@@ -96,8 +96,8 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 		for _, e := range fl {
 			fileMap := e.(map[string]any)
 
-			fileLength := fileMap["length"].(int)
-			totalSize += fileLength
+			finalFileSize := fileMap["length"].(int)
+			totalSize += finalFileSize
 
 			pathList := fileMap["path"].([]any)
 
@@ -109,7 +109,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 
 			files = append(files, &fileInfo{
 				path:      completePath,
-				finalSize: int64(fileLength),
+				finalSize: int64(finalFileSize),
 			})
 		}
 	} else if fileStructure == "single" {
@@ -156,7 +156,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 		piecesDownloaded++
 	}
 
-	fmt.Println("Aready have", existingPieces)
+	fmt.Println("Already have", existingPieces)
 
 	return &Torrent{
 		metaInfoFileName: metaInfoFileName,
@@ -177,75 +177,103 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]int, error) {
 	p := NewPieceData(pieceSize)
 	var pieceNums []int
-	offset := int64(0) // 0-based index into the "stream" of pieces
-	fileEndIdx := int64(0)
 
-	for _, f := range files {
-		fileEndIdx += f.finalSize
+	// All indices are relative to the "stream" of pieces and may cross file boundaries
+	fileStartIdx := int64(0)
+	remainingPieceSize := math.MaxInt
 
-		fi, err := os.Stat(f.path)
+	for i := 0; i < len(files); i++ {
+		currFile := files[i]
+		fileEndIdx := fileStartIdx + currFile.finalSize
+
+		fi, err := os.Stat(currFile.path)
 		if err != nil {
 			return nil, err
 		}
 
 		for {
-			if fi.Size() < f.finalSize {
-				if offset >= fi.Size() {
+			pieceStartIdx := int64(p.num * pieceSize)
+			// pieceEndIdx := pieceStartIdx + int64(pieceSize)
+			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
+
+			if pieceOffsetIntoFile < 0 {
+				pieceOffsetIntoFile = 0
+			}
+
+			if fi.Size() < currFile.finalSize {
+				if pieceOffsetIntoFile >= fi.Size() {
 					break
 				}
 			} else {
-				if offset >= fileEndIdx {
+				if pieceOffsetIntoFile >= fileEndIdx {
+					panic("???")
 					break
 				}
 			}
 
-			bytesFromEnd := fileEndIdx - offset
+			bytesFromEnd := fileEndIdx - pieceOffsetIntoFile
+			limits := []int{pieceSize, int(currFile.finalSize), int(bytesFromEnd), remainingPieceSize}
+			readSize := slices.Min(limits)
 
-			readSize := math.MaxInt
-			limits := []int{pieceSize, int(f.finalSize), int(bytesFromEnd)}
-			for _, v := range limits {
-				if v < readSize {
-					readSize = v
-				}
-			}
-
-			fmt.Println(readSize)
-
-			if readSize < pieceSize {
-				// FIX: Restore full capacity, check pieces that cross file boundaries
-				p.data = p.data[:readSize]
-			}
-
-			_, err := f.fd.ReadAt(p.data, offset)
-			if err != nil {
-				return nil, err
-			}
-
-			pieceEmpty := true
-			// TODO: Cache this
-			for i := 0; i < len(p.data); i++ {
-				if p.data[i] != 0 {
-					pieceEmpty = false
-					break
-				}
-			}
-
-			if !pieceEmpty {
-				correct, err := checkPieceHash(*p, piecesStr, readSize)
+			// TODO: What if the last file is smaller than a piece?
+			// TODO: What if piece is at the start of a file? finalSize and BytesFromEnd are equal
+			if readSize == remainingPieceSize || readSize == pieceSize {
+				_, err := currFile.fd.ReadAt(p.data[pieceSize-readSize:], pieceOffsetIntoFile)
 				if err != nil {
 					return nil, err
 				}
 
-				if correct {
-					pieceNums = append(pieceNums, p.num)
-				} else {
+				empty := slices.Max(p.data) == 0
+
+				correct, err := checkPieceHash(*p, piecesStr, pieceSize)
+				if err != nil {
+					return nil, err
+				}
+
+				if !correct {
+					if !empty {
+						return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
+					}
+					fmt.Println(p.num, "was empty")
+					p.num++
+					continue
+				}
+
+				pieceNums = append(pieceNums, p.num)
+				fmt.Printf("%v passed check\n", p.num)
+				p.num++
+				remainingPieceSize = math.MaxInt
+			} else if readSize == int(currFile.finalSize) {
+				// Piece must cross file boundary
+				_, err := currFile.fd.ReadAt(p.data[fileStartIdx:fileEndIdx], pieceOffsetIntoFile)
+				if err != nil {
+					return nil, err
+				}
+				remainingPieceSize = pieceSize - readSize
+				fileStartIdx += currFile.finalSize
+				break
+			} else if readSize == int(bytesFromEnd) {
+				// If it's the start of the (last) piece:
+				_, err := currFile.fd.ReadAt(p.data[:bytesFromEnd], pieceOffsetIntoFile)
+				if err != nil {
+					return nil, err
+				}
+
+				correct, err := checkPieceHash(*p, piecesStr, pieceSize)
+				if err != nil {
+					return nil, err
+				}
+
+				if !correct {
 					return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
 				}
-			}
 
-			clear(p.data) // Necessary?
-			p.num++
-			offset += int64(pieceSize)
+				pieceNums = append(pieceNums, p.num)
+				fmt.Printf("%v passed check\n", p.num)
+				p.num++
+
+				// If it's continuing a piece: idk lol
+			}
 		}
 	}
 	return pieceNums, nil
@@ -365,7 +393,7 @@ func NewPieceData(pieceLen int) *pieceData {
 	return &pieceData{data: data}
 }
 
-func (p *pieceData) updateWithCopy(msg peerMessage, blockSize int) {
+func (p *pieceData) storeBlock(msg peerMessage, blockSize int) {
 	block := p.data[msg.blockOffset : msg.blockOffset+blockSize]
 	// TODO: Don't copy each block twice
 	copy(block, msg.blockData)
@@ -398,7 +426,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 	p := NewPieceData(t.pieceSize)
 	lastPieceNum := t.numPieces - 1 // 0-based
 
-	numBytesToRequest := BLOCK_SIZE
+	currBlockSize := BLOCK_SIZE
 	currPieceSize := t.pieceSize
 
 	for {
@@ -444,7 +472,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 				outboundMsgs <- reqMsg
 				fmt.Printf("Requesting piece %v/%v from %v\n", p.num, lastPieceNum, peerAddr)
 			case piece:
-				p.updateWithCopy(msg, numBytesToRequest)
+				p.storeBlock(msg, currBlockSize)
 
 				if p.num == lastPieceNum {
 					currPieceSize = t.totalSize - p.num*t.pieceSize
@@ -456,7 +484,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 					blockOffset += BLOCK_SIZE // Account for block just downloaded
 					remaining := currPieceSize - blockOffset
 					if remaining < BLOCK_SIZE {
-						numBytesToRequest = remaining
+						currBlockSize = remaining
 					}
 					fmt.Println(blockOffset, "/", currPieceSize, "bytes")
 				} else {
@@ -489,12 +517,14 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 						return
 					}
 
-					blockOffset = 0
+					// Reset
 					currPieceSize = t.pieceSize
+					currBlockSize = BLOCK_SIZE
 					numBlocks = t.pieceSize / BLOCK_SIZE
+					blockOffset = 0
 					lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
-					numBytesToRequest = BLOCK_SIZE
 					clear(p.data) // In case we pause in the middle of a piece
+
 					p.num, err = nextAvailablePieceIdx(p.num, t.numPieces, peerBitfield, t.bitfield)
 					if err != nil {
 						signalErrors <- err
@@ -502,9 +532,9 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 					}
 				}
 
-				reqMsg := createRequestMsg(p.num, blockOffset, numBytesToRequest)
+				reqMsg := createRequestMsg(p.num, blockOffset, currBlockSize)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Requesting %v bytes for piece %v/%v from %v\n", numBytesToRequest, p.num, lastPieceNum, peerAddr)
+				fmt.Printf("Requesting %v bytes for piece %v/%v from %v\n", currBlockSize, p.num, lastPieceNum, peerAddr)
 			case have:
 				updateBitfield(&peerBitfield, msg.pieceNum)
 			}
@@ -512,9 +542,9 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 	}
 }
 
-func (t *Torrent) savePiece(p *pieceData, pieceSize int) error {
+func (t *Torrent) savePiece(p *pieceData, currPieceSize int) error {
 	pieceStartIdx := int64(p.num * t.pieceSize)
-	pieceEndIdx := pieceStartIdx + int64(pieceSize)
+	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
 	if len(t.files) == 1 {
 		_, err := t.files[0].fd.WriteAt(p.data, pieceStartIdx)
