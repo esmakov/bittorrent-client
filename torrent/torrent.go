@@ -206,12 +206,11 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 				}
 			} else {
 				if pieceOffsetIntoFile >= fileEndIdx {
-					panic("???")
 					break
 				}
 			}
 
-			bytesFromEnd := fileEndIdx - pieceOffsetIntoFile
+			bytesFromEnd := fileEndIdx - pieceStartIdx
 			limits := []int{pieceSize, int(currFile.finalSize), int(bytesFromEnd), remainingPieceSize}
 			readSize := slices.Min(limits)
 
@@ -259,7 +258,7 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 					return nil, err
 				}
 
-				correct, err := checkPieceHash(*p, piecesStr, pieceSize)
+				correct, err := checkPieceHash(*p, piecesStr, readSize)
 				if err != nil {
 					return nil, err
 				}
