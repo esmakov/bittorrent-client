@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -43,6 +44,7 @@ type Torrent struct {
 	bitfield         []byte
 	files            []*torrentFile
 	lastChecked      time.Time
+	dir              string
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 	sync.Mutex
 }
@@ -56,7 +58,10 @@ type torrentFile struct {
 
 func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (*Torrent, error) {
 	// Fields common to single-file and multi-file torrents
-	bAnnounce := metaInfoMap["announce"].(string)
+	announce := ""
+	if bAnnounce, ok := metaInfoMap["announce"]; ok {
+		announce = bAnnounce.(string)
+	}
 	bInfo := metaInfoMap["info"].(map[string]any)
 
 	bPieceLength := bInfo["piece length"].(int)
@@ -86,10 +91,10 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 	totalSize := 0
 
 	var files []*torrentFile
-	var bDirName string
+	var dir string
 
 	if hasMultipleFiles {
-		bDirName = bInfo["name"].(string)
+		dir = bInfo["name"].(string)
 
 		for _, f := range bFiles.([]any) {
 			bFile := f.(map[string]any)
@@ -103,10 +108,9 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 			for _, f := range bPathList {
 				pathSegments = append(pathSegments, f.(string))
 			}
-			completePath := strings.Join(pathSegments, string(os.PathSeparator))
 
 			files = append(files, &torrentFile{
-				path:      completePath,
+				path:      filepath.Join(pathSegments...),
 				finalSize: int64(bFileLength),
 			})
 		}
@@ -121,7 +125,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 
 	t := &Torrent{
 		metaInfoFileName: metaInfoFileName,
-		trackerHostname:  bAnnounce,
+		trackerHostname:  announce,
 		infoHash:         infoHash,
 		comment:          comment,
 		isPrivate:        isPrivate == 1,
@@ -131,33 +135,41 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 		totalSize:        totalSize,
 		bitfield:         bitfield,
 		files:            files,
+		dir:              dir,
 	}
 
+	return t, nil
+}
+
+func (t *Torrent) CreateAndCheckFiles() error {
 	var filesToCheck []*torrentFile
-	if bDirName != "" {
-		os.Mkdir(bDirName, 0766)
+	if t.dir != "" {
+		os.Mkdir(t.dir, 0766)
 	}
-	for _, tf := range files {
-		if bDirName != "" {
-			tf.path = bDirName + string(os.PathSeparator) + tf.path
+	for _, tf := range t.files {
+		if t.dir != "" {
+			tf.path = filepath.Join(t.dir, tf.path)
 		}
 
 		fd, err := os.OpenFile(tf.path, os.O_RDWR, 0)
 		if errors.Is(err, fs.ErrNotExist) {
 			fd, err = os.Create(tf.path)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			tf.fd = fd
 		} else if err != nil {
-			return nil, err
+			return err
 		} else {
 			tf.fd = fd
 			fi, err := os.Stat(tf.fd.Name())
 			if err != nil {
-				return nil, err
+				return err
 			}
-			if fi.ModTime().After(t.lastChecked) { // TODO: Fix
+
+			// TODO: Since a new torrent instance is created each run,
+			// this doesn't have the intended effect.
+			if fi.ModTime().After(t.lastChecked) {
 				filesToCheck = append(filesToCheck, tf)
 			}
 		}
@@ -165,11 +177,12 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 
 	existingPieces, err := t.checkExistingPieces(filesToCheck)
 	if err != nil {
-		return nil, err
+		return err
 	}
+
 	fmt.Println(existingPieces)
 
-	return t, nil
+	return nil
 }
 
 func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {

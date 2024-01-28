@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/esmakov/bittorrent-client/parser"
@@ -68,18 +67,12 @@ func main() {
 }
 
 func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torrent, error) {
-	fd, err := os.Open(metaInfoFileName)
+	fileBytes, err := os.ReadFile(metaInfoFileName)
 	if err != nil {
 		return nil, err
 	}
-	defer fd.Close()
 
 	p := parser.New(shouldPrettyPrint)
-
-	fileBytes, err := io.ReadAll(fd)
-	if err != nil {
-		return nil, err
-	}
 
 	topLevelMap, infoHash, err := p.ParseMetaInfoFile(fileBytes)
 	if err != nil {
@@ -91,5 +84,9 @@ func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torre
 		return nil, err
 	}
 
+	err = t.CreateAndCheckFiles()
+	if err != nil {
+		return nil, err
+	}
 	return t, nil
 }
