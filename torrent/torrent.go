@@ -41,141 +41,141 @@ type Torrent struct {
 	piecesDownloaded int
 	piecesUploaded   int
 	bitfield         []byte
-	files            []*fileInfo
+	files            []*torrentFile
+	lastChecked      time.Time
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 	sync.Mutex
 }
 
-type fileInfo struct {
+type torrentFile struct {
 	fd        *os.File
 	path      string
 	finalSize int64
+	// TODO: wanted bool
 }
 
 func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (*Torrent, error) {
 	// Fields common to single-file and multi-file torrents
-	trackerHostname := metaInfoMap["announce"].(string)
-	infoMap := metaInfoMap["info"].(map[string]any)
+	bAnnounce := metaInfoMap["announce"].(string)
+	bInfo := metaInfoMap["info"].(map[string]any)
 
-	pieceSize := infoMap["piece length"].(int)
-	piecesStr := infoMap["pieces"].(string)
-	numPieces := len(piecesStr) / 20
+	bPieceLength := bInfo["piece length"].(int)
+	bPieces := bInfo["pieces"].(string)
+	numPieces := len(bPieces) / 20
 
 	bitfieldLen := int(math.Ceil(float64(numPieces) / 8.0))
 	bitfield := make([]byte, bitfieldLen)
 
 	// Optional common fields
 	comment := ""
-	if commentEntry, ok := metaInfoMap["comment"]; ok {
-		comment = commentEntry.(string)
+	if bComment, ok := metaInfoMap["comment"]; ok {
+		comment = bComment.(string)
 	}
 
 	isPrivate := 0
-	if isPrivateEntry, ok := infoMap["private"]; ok {
-		isPrivate = isPrivateEntry.(int)
+	if bPrivate, ok := bInfo["private"]; ok {
+		isPrivate = bPrivate.(int)
 	}
 
-	fileStructure := ""
-	filesList := infoMap["files"]
-	if filesList != nil {
-		fileStructure = "multiple"
-	} else {
-		fileStructure = "single"
+	hasMultipleFiles := false
+	bFiles := bInfo["files"]
+	if bFiles != nil {
+		hasMultipleFiles = true
 	}
 
 	totalSize := 0
 
-	var files []*fileInfo
-	var dirName string
+	var files []*torrentFile
+	var bDirName string
 
-	if fileStructure == "multiple" {
-		fl := filesList.([]any)
+	if hasMultipleFiles {
+		bDirName = bInfo["name"].(string)
 
-		dirName = infoMap["name"].(string)
+		for _, f := range bFiles.([]any) {
+			bFile := f.(map[string]any)
 
-		for _, e := range fl {
-			fileMap := e.(map[string]any)
+			bFileLength := bFile["length"].(int)
+			totalSize += bFileLength
 
-			finalFileSize := fileMap["length"].(int)
-			totalSize += finalFileSize
-
-			pathList := fileMap["path"].([]any)
+			bPathList := bFile["path"].([]any)
 
 			var pathSegments []string
-			for _, f := range pathList {
+			for _, f := range bPathList {
 				pathSegments = append(pathSegments, f.(string))
 			}
 			completePath := strings.Join(pathSegments, string(os.PathSeparator))
 
-			files = append(files, &fileInfo{
+			files = append(files, &torrentFile{
 				path:      completePath,
-				finalSize: int64(finalFileSize),
+				finalSize: int64(bFileLength),
 			})
 		}
-	} else if fileStructure == "single" {
-		f := infoMap["name"].(string)
-		totalSize = infoMap["length"].(int)
-		files = append(files, &fileInfo{
+	} else {
+		f := bInfo["name"].(string)
+		totalSize = bInfo["length"].(int)
+		files = append(files, &torrentFile{
 			path:      f,
 			finalSize: int64(totalSize),
 		})
 	}
 
-	piecesDownloaded := 0
-	var filesToCheck []*fileInfo
-	if dirName != "" {
-		os.Mkdir(dirName, 0766)
-	}
-	for _, f := range files {
-		if dirName != "" {
-			f.path = dirName + string(os.PathSeparator) + f.path
-		}
-
-		fd, err := os.OpenFile(f.path, os.O_RDWR, 0)
-		if errors.Is(err, fs.ErrNotExist) {
-			fd, err = os.Create(f.path)
-			if err != nil {
-				return nil, err
-			}
-			f.fd = fd
-		} else if err != nil {
-			return nil, err
-		} else {
-			f.fd = fd
-			filesToCheck = append(filesToCheck, f)
-		}
-	}
-
-	existingPieces, err := checkPiecesOnDisk(filesToCheck, pieceSize, piecesStr)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, v := range existingPieces {
-		updateBitfield(&bitfield, v)
-		piecesDownloaded++
-	}
-	fmt.Println(existingPieces)
-
-	return &Torrent{
+	t := &Torrent{
 		metaInfoFileName: metaInfoFileName,
-		trackerHostname:  trackerHostname,
+		trackerHostname:  bAnnounce,
 		infoHash:         infoHash,
 		comment:          comment,
 		isPrivate:        isPrivate == 1,
-		piecesStr:        piecesStr,
-		pieceSize:        pieceSize,
+		piecesStr:        bPieces,
+		pieceSize:        bPieceLength,
 		numPieces:        numPieces,
-		piecesDownloaded: piecesDownloaded,
 		totalSize:        totalSize,
 		bitfield:         bitfield,
 		files:            files,
-	}, nil
+	}
+
+	var filesToCheck []*torrentFile
+	if bDirName != "" {
+		os.Mkdir(bDirName, 0766)
+	}
+	for _, tf := range files {
+		if bDirName != "" {
+			tf.path = bDirName + string(os.PathSeparator) + tf.path
+		}
+
+		fd, err := os.OpenFile(tf.path, os.O_RDWR, 0)
+		if errors.Is(err, fs.ErrNotExist) {
+			fd, err = os.Create(tf.path)
+			if err != nil {
+				return nil, err
+			}
+			tf.fd = fd
+		} else if err != nil {
+			return nil, err
+		} else {
+			tf.fd = fd
+			fi, err := os.Stat(tf.fd.Name())
+			if err != nil {
+				return nil, err
+			}
+			if fi.ModTime().After(t.lastChecked) { // TODO: Fix
+				filesToCheck = append(filesToCheck, tf)
+			}
+		}
+	}
+
+	existingPieces, err := t.checkExistingPieces(filesToCheck)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(existingPieces)
+
+	return t, nil
 }
 
-func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]int, error) {
+func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
 	fmt.Println("Checking...")
-	p := NewPieceData(pieceSize)
+
+	p := NewPieceData(t.pieceSize)
 	var pieceNums []int
 
 	// All indices are relative to the "stream" of pieces and may cross file boundaries
@@ -192,8 +192,8 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 		}
 
 		for {
-			pieceStartIdx := int64(p.num * pieceSize)
-			// pieceEndIdx := pieceStartIdx + int64(pieceSize)
+			pieceStartIdx := int64(p.num * t.pieceSize)
+			// pieceEndIdx := pieceStartIdx + int64(t.pieceSize)
 			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
 
 			if pieceOffsetIntoFile < 0 {
@@ -211,21 +211,20 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 				}
 			}
 
+			// TODO: What if the last file is smaller than a piece?
 			bytesFromEnd := fileEndIdx - pieceStartIdx
-			limits := []int{pieceSize, int(currFile.finalSize), int(bytesFromEnd), remainingPieceSize}
+			limits := []int{t.pieceSize, int(currFile.finalSize), int(bytesFromEnd), remainingPieceSize}
 			readSize := slices.Min(limits)
 
-			// TODO: What if the last file is smaller than a piece?
-			// TODO: What if piece is at the start of a file? finalSize and bytesFromEnd are equal
-			if readSize == remainingPieceSize || readSize == pieceSize {
-				_, err := currFile.fd.ReadAt(p.data[pieceSize-readSize:], pieceOffsetIntoFile)
+			if readSize == remainingPieceSize || readSize == t.pieceSize {
+				_, err := currFile.fd.ReadAt(p.data[t.pieceSize-readSize:], pieceOffsetIntoFile)
 				if err != nil {
 					return nil, err
 				}
 
 				empty := slices.Max(p.data) == 0
 
-				correct, err := checkPieceHash(*p, piecesStr, pieceSize)
+				correct, err := checkPieceHash(*p, t.piecesStr, t.pieceSize)
 				if err != nil {
 					return nil, err
 				}
@@ -240,8 +239,11 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 				}
 
 				// fmt.Printf("%v passed check\n", p.num)
+				updateBitfield(&t.bitfield, p.num)
+				t.storeDownloaded(t.piecesDownloaded + 1)
 				pieceNums = append(pieceNums, p.num)
 				p.num++
+
 				remainingPieceSize = math.MaxInt
 			} else if readSize == int(currFile.finalSize) {
 				// Piece must cross file boundary
@@ -249,7 +251,7 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 				if err != nil {
 					return nil, err
 				}
-				remainingPieceSize = pieceSize - readSize
+				remainingPieceSize = t.pieceSize - readSize
 				fileStartIdx += currFile.finalSize
 				break
 			} else if readSize == int(bytesFromEnd) {
@@ -259,7 +261,7 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 					return nil, err
 				}
 
-				correct, err := checkPieceHash(*p, piecesStr, readSize)
+				correct, err := checkPieceHash(*p, t.piecesStr, readSize)
 				if err != nil {
 					return nil, err
 				}
@@ -268,6 +270,8 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 					return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
 				}
 
+				updateBitfield(&t.bitfield, p.num)
+				t.storeDownloaded(t.piecesDownloaded + 1)
 				pieceNums = append(pieceNums, p.num)
 				// fmt.Printf("%v passed check\n", p.num)
 				p.num++
@@ -276,6 +280,8 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 			}
 		}
 	}
+
+	t.lastChecked = time.Now()
 	return pieceNums, nil
 }
 
@@ -374,7 +380,6 @@ func (t *Torrent) Start() error {
 			return nil
 		}
 	}
-	// TODO: Run in background
 }
 
 func getRandPeer(peerList []string) string {
@@ -661,8 +666,7 @@ func connectAndParse(infoHash, myPeerId []byte, peerAddr string, parsedMessages 
 		}
 		t.Reset(waitDuration)
 
-		// TODO: More versatile check
-		if binary.BigEndian.Uint64(msgBuf) == 0 {
+		if slices.Max(msgBuf) == 0 {
 			// fmt.Println("Didn't already contain fragment(s)")
 			copy(msgBuf, tempBuf)
 		} else {
