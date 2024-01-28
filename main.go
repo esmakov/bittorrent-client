@@ -49,6 +49,11 @@ func main() {
 			return
 		}
 
+		if t.IsComplete() {
+			// TODO: Start seeding
+			return
+		}
+
 		fmt.Println(t)
 
 		if err := t.Start(); err != nil {

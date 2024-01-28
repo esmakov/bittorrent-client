@@ -155,8 +155,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 		updateBitfield(&bitfield, v)
 		piecesDownloaded++
 	}
-
-	fmt.Println("Already have", existingPieces)
+	fmt.Println(existingPieces)
 
 	return &Torrent{
 		metaInfoFileName: metaInfoFileName,
@@ -175,6 +174,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 }
 
 func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]int, error) {
+	fmt.Println("Checking...")
 	p := NewPieceData(pieceSize)
 	var pieceNums []int
 
@@ -202,6 +202,7 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 
 			if fi.Size() < currFile.finalSize {
 				if pieceOffsetIntoFile >= fi.Size() {
+					fileStartIdx += currFile.finalSize
 					break
 				}
 			} else {
@@ -215,7 +216,7 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 			readSize := slices.Min(limits)
 
 			// TODO: What if the last file is smaller than a piece?
-			// TODO: What if piece is at the start of a file? finalSize and BytesFromEnd are equal
+			// TODO: What if piece is at the start of a file? finalSize and bytesFromEnd are equal
 			if readSize == remainingPieceSize || readSize == pieceSize {
 				_, err := currFile.fd.ReadAt(p.data[pieceSize-readSize:], pieceOffsetIntoFile)
 				if err != nil {
@@ -233,13 +234,13 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 					if !empty {
 						return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
 					}
-					fmt.Println(p.num, "was empty")
+					// fmt.Println(p.num, "was empty")
 					p.num++
 					continue
 				}
 
+				// fmt.Printf("%v passed check\n", p.num)
 				pieceNums = append(pieceNums, p.num)
-				fmt.Printf("%v passed check\n", p.num)
 				p.num++
 				remainingPieceSize = math.MaxInt
 			} else if readSize == int(currFile.finalSize) {
@@ -268,7 +269,7 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 				}
 
 				pieceNums = append(pieceNums, p.num)
-				fmt.Printf("%v passed check\n", p.num)
+				// fmt.Printf("%v passed check\n", p.num)
 				p.num++
 
 				// If it's continuing a piece: idk lol
@@ -278,8 +279,8 @@ func checkPiecesOnDisk(files []*fileInfo, pieceSize int, piecesStr string) ([]in
 	return pieceNums, nil
 }
 
-func (t *Torrent) IsInProgress() bool {
-	return t.piecesDownloaded > 0 && t.piecesDownloaded < t.numPieces
+func (t *Torrent) IsComplete() bool {
+	return t.piecesDownloaded == t.numPieces
 }
 
 func (t *Torrent) String() string {
@@ -511,7 +512,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 					updateBitfield(&t.bitfield, msg.pieceNum)
 					fmt.Printf("%b\n", t.bitfield)
 
-					if t.piecesDownloaded == t.numPieces {
+					if t.IsComplete() {
 						signalDone <- struct{}{}
 						return
 					}
@@ -546,7 +547,7 @@ func (t *Torrent) savePiece(p *pieceData, currPieceSize int) error {
 	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
 	if len(t.files) == 1 {
-		_, err := t.files[0].fd.WriteAt(p.data, pieceStartIdx)
+		_, err := t.files[0].fd.WriteAt(p.data[:currPieceSize], pieceStartIdx)
 		return err
 	}
 
@@ -563,14 +564,12 @@ func (t *Torrent) savePiece(p *pieceData, currPieceSize int) error {
 		fileEndIdx := fileStartIdx + currFile.finalSize
 
 		if pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx {
-			_, err := currFd.WriteAt(p.data, pieceStartIdx)
+			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
+			_, err := currFd.WriteAt(p.data[:currPieceSize], pieceOffsetIntoFile)
 			return err
 		} else if pieceStartIdx >= fileEndIdx {
 			fileStartIdx += currFile.finalSize
-			// fmt.Println("Piece belongs in next file")
-			// } else if pieceStartIdx > fileStartIdx && pieceEndIdx > fileEndIdx {
 		} else {
-			// fmt.Println("Piece crosses file boundary")
 			nextFile := t.files[i+1]
 			nextFd := nextFile.fd
 
