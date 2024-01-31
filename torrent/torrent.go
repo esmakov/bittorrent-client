@@ -175,12 +175,10 @@ func (t *Torrent) CreateAndCheckFiles() error {
 		}
 	}
 
-	existingPieces, err := t.checkExistingPieces(filesToCheck)
+	_, err := t.checkExistingPieces(filesToCheck)
 	if err != nil {
 		return err
 	}
-
-	fmt.Println("Already had", existingPieces)
 
 	return nil
 }
@@ -229,13 +227,41 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
 			if (pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx) || remainingPieceSize < t.pieceSize {
                 if remainingPieceSize < t.pieceSize {
                     readSize := min(int(currFile.finalSize), remainingPieceSize)
+                    if pieceOffsetIntoFile != 0 {
+                        panic("Interesting if this happens")
+                    }
                     if _, err := currFile.fd.ReadAt(p.data[startReadAt:startReadAt+readSize], pieceOffsetIntoFile); err != nil {
                         return nil, err
                     }
                     remainingPieceSize -= readSize
                     startReadAt += readSize
                     if remainingPieceSize < 0 {
-                        panic("huh??")
+                        panic("remainingPieceSize < 0")
+                    }
+
+                    if p.num == t.numPieces - 1 && i == len(files) -1 {
+                        // Last one!
+                        empty := slices.Max(p.data) == 0
+
+                        lastPieceSize := t.totalSize - (t.numPieces -1 ) * t.pieceSize
+                        correct, err := checkPieceHash(*p, t.piecesStr, lastPieceSize)
+                        if err != nil {
+                            return nil, err
+                        }
+
+                        if !correct {
+                            if !empty {
+                                return nil, errors.New(fmt.Sprintf("Piece %v/%v failed hash check\n", p.num, t.numPieces-1))
+                            }
+                            // Hasn't been downloaded yet
+                            p.num++
+                            continue
+                        }
+                        // Could be empty and still correct at this point, if intentionally so
+                        updateBitfield(&t.bitfield, p.num)
+                        t.piecesDownloaded++
+                        pieceNums = append(pieceNums, p.num)
+                        break
                     }
 
                     if remainingPieceSize > 0 {
@@ -247,7 +273,7 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
                     if remainingPieceSize == 0 {
                         // Ready to be checked below
                         if startReadAt != t.pieceSize {
-                            panic("Noticed this should be the case")
+                            panic("Piece fragments do not add up to a whole piece")
                          }
                         remainingPieceSize = t.pieceSize
                         startReadAt = 0
@@ -267,14 +293,13 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
 
 				if !correct {
 					if !empty {
-						return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
+                        return nil, errors.New(fmt.Sprintf("Piece %v/%v failed hash check\n", p.num, t.numPieces))
 					}
                     // Hasn't been downloaded yet
 					p.num++
 					continue
 				}
                 // Could be empty and still correct at this point, if intentionally so
-				// fmt.Printf("%v passed check\n", p.num)
 				updateBitfield(&t.bitfield, p.num)
 				t.piecesDownloaded++
 				pieceNums = append(pieceNums, p.num)
@@ -284,6 +309,7 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
                 clear(p.data)
 			} else if pieceStartIdx >= fileStartIdx && pieceStartIdx < fileEndIdx && pieceEndIdx >= fileEndIdx {
 				// Piece must cross file boundary
+
                 if pieceStartIdx < fileStartIdx {
                     panic("bytesFromEnd will be calculated too high")
                 }
@@ -292,8 +318,8 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
 					return nil, err
 				}
 
-                if p.num == t.numPieces - 1 {
-                    // All done!
+                if p.num == t.numPieces - 1 && i == len(files) -1 {
+                    // Last one!
                     empty := slices.Max(p.data) == 0
 
                     correct, err := checkPieceHash(*p, t.piecesStr, int(bytesFromEnd))
@@ -303,14 +329,13 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
 
                     if !correct {
                         if !empty {
-                            return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
+                            return nil, errors.New(fmt.Sprintf("Piece %v/%v failed hash check\n", p.num, t.numPieces-1))
                         }
                         // Hasn't been downloaded yet
                         p.num++
                         continue
                     }
                     // Could be empty and still correct at this point, if intentionally so
-                    // fmt.Printf("%v passed check\n", p.num)
                     updateBitfield(&t.bitfield, p.num)
                     t.piecesDownloaded++
                     pieceNums = append(pieceNums, p.num)
@@ -322,7 +347,7 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
                 fileStartIdx += currFile.finalSize
 				break
 			} else {
-				panic("uh")
+				panic("Unreachable")
 			}
 		}
 	}
@@ -519,6 +544,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 				// }
 
 				p.num = lastPieceNum
+
 				reqMsg := createRequestMsg(p.num, blockOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
 				fmt.Printf("Requesting piece %v/%v from %v\n", p.num, lastPieceNum, peerAddr)
@@ -553,8 +579,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 						return
 					}
 
-					err = t.savePiece(p, currPieceSize)
-					if err != nil {
+				    if err = t.savePiece(p, currPieceSize); err != nil {
 						signalErrors <- err
 						return
 					}

@@ -1,35 +1,32 @@
 package torrent
 
 import (
-	"errors"
+    "fmt"
 	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
 // NOTE: Requires having github.com/pobrn/mktorrent/ in your PATH
 func TestCheckExistingPieces(t *testing.T) {
-	const NUM_TEST_FILES = 3
-	const MAX_TEST_FILE_SIZE = 64 * 1024
-	// runs := struct{}{
-	// 	struct{}{[5], [500 * 1024]},
-	// 	struct{}{[3], [3 * 1024 * 1024]},
-	// }
+    numFiles := rand.Intn(12)
+    maxFileSize := 128 * 1024
 
 	testDir, err := os.MkdirTemp(".", "torrent_test_0_")
 	if err != nil {
 		t.Error(err)
 	}
 
-	for i := 0; i < NUM_TEST_FILES; i++ {
+	for i := 0; i < numFiles; i++ {
 		file, err := os.CreateTemp(testDir, "test_file_")
 		if err != nil {
 			t.Error(err)
 		}
-		b := make([]byte, rand.Intn(MAX_TEST_FILE_SIZE))
+		b := make([]byte, rand.Intn(maxFileSize))
         // So we don't get correct=true when checking a piece that hasn't been completed
         for i := 0; i < len(b); i++ {
             b[i] = 1
@@ -72,7 +69,7 @@ func TestCheckExistingPieces(t *testing.T) {
 	}
 
     if !torr.IsComplete() {
-        t.Error(errors.New("All pieces should have passed hash check"))
+        t.Error(fmt.Sprintf("Only %v/%v pieces were checked:%b", torr.piecesDownloaded, torr.numPieces, torr.bitfield))
     }
 
 	if err := os.RemoveAll(torr.dir); err != nil {
@@ -84,4 +81,4 @@ func TestCheckExistingPieces(t *testing.T) {
 	}
 }
 
-func TestCreateMetainfoFile(t *testing.T) {}
+func TestNextAvailablePieceIdx(t *testing.T) {}
