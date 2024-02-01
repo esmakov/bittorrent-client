@@ -148,7 +148,7 @@ func (t *Torrent) IsComplete() bool {
 func updateBitfield(bitfield []byte, pieceNum int) {
 	pieceByteIdx := pieceNum / 8
 	bitsFromRight := 7 - (pieceNum % 8)
-	b := &(bitfield[pieceByteIdx])
+	b := &bitfield[pieceByteIdx]
 	mask := uint8(0x01) << bitsFromRight
 	*b |= mask
 }
@@ -198,8 +198,7 @@ func (t *Torrent) String() string {
     return sb.String()
 }
 
-// TODO: Split into two separate funcs?
-func (t *Torrent) CreateAndCheckFiles() error {
+func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
 	var filesToCheck []*torrentFile
 	if t.dir != "" {
 		os.Mkdir(t.dir, 0766)
@@ -213,16 +212,16 @@ func (t *Torrent) CreateAndCheckFiles() error {
 		if errors.Is(err, fs.ErrNotExist) {
 			fd, err = os.Create(tf.path)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			tf.fd = fd
 		} else if err != nil {
-			return err
+				return nil, err
 		} else {
 			tf.fd = fd
 			fi, err := os.Stat(tf.fd.Name())
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			// TODO: Since a new torrent instance is created each run,
@@ -233,15 +232,10 @@ func (t *Torrent) CreateAndCheckFiles() error {
 		}
 	}
 
-	_, err := t.checkExistingPieces(filesToCheck)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return filesToCheck, nil
 }
 
-func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
+func (t *Torrent) CheckExistingPieces(files []*torrentFile) ([]int, error) {
 	fmt.Println("Checking...")
 
 	p := NewPieceData(t.pieceSize)
@@ -671,14 +665,15 @@ func (t *Torrent) savePiece(p *pieceData, currPieceSize int) error {
 		currFile := t.files[i]
 		currFd := currFile.fd
 		fileEndIdx := fileStartIdx + currFile.finalSize
+        pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
 
-		if pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx {
-			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
+        if pieceStartIdx >= fileEndIdx {
+            fileStartIdx += currFile.finalSize
+        } else if pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx {
 			_, err := currFd.WriteAt(p.data[:currPieceSize], pieceOffsetIntoFile)
 			return err
-		} else if pieceStartIdx >= fileEndIdx {
-			fileStartIdx += currFile.finalSize
 		} else {
+            // Piece crosses file boundary
 			nextFile := t.files[i+1]
 			nextFd := nextFile.fd
 

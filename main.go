@@ -90,9 +90,15 @@ func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torre
 		return nil, err
 	}
 
-	err = t.CreateAndCheckFiles()
+    filesToCheck, err := t.OpenOrCreateFiles()
 	if err != nil {
 		return nil, err
 	}
+
+	_, err = t.CheckExistingPieces(filesToCheck)
+	if err != nil {
+        return nil, err
+	}
+
 	return t, nil
 }

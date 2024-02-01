@@ -5,20 +5,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
 func TestCheckExistingPieces(t *testing.T) {
-    torr, err := createTorrentWithTestData(rand.Intn(100),128 * 1024) 
+    torr, err := createTorrentWithTestData(
+        rand.Intn(100),
+        rand.Intn(128 * 1024))
 	if err != nil {
 		t.Error(err)
 	}
 
-	err = torr.CreateAndCheckFiles()
+    filesToCheck, err := torr.OpenOrCreateFiles()
 	if err != nil {
 		t.Error(err)
+	}
+
+	_, err = torr.CheckExistingPieces(filesToCheck)
+	if err != nil {
+        t.Error(err)
 	}
 
     if !torr.IsComplete() {
@@ -35,30 +43,40 @@ func TestCheckExistingPieces(t *testing.T) {
 }
 
 func TestSavePiece(t *testing.T) {
-    torr, err := createTorrentWithTestData(10, 64 * 1024)
+    torr, err := createTorrentWithTestData(
+        3,
+        rand.Intn(128 * 1024))
 	if err := os.RemoveAll(torr.dir); err != nil {
 		t.Error(err)
 	}
 
-	// if err := os.Remove(torr.metaInfoFileName); err != nil {
-	// 	t.Error(err)
-	// }
-
 	p := NewPieceData(torr.pieceSize)
-    p.num = rand.Intn(torr.numPieces-1) // Last piece won't check right with this approach
+    p.num = rand.Intn(torr.numPieces)
+
+    lastPieceSize := torr.totalSize - (torr.numPieces -1 ) * torr.pieceSize
+    currPieceSize := torr.pieceSize
+    if p.num == torr.numPieces - 1 {
+        currPieceSize = lastPieceSize
+    }
     for i:=0;i<len(p.data);i++ {
         p.data[i] = 1
     }
-    if err := torr.savePiece(p, torr.pieceSize); err != nil {
-        t.Error(err)
-    }
 
-	err = torr.CreateAndCheckFiles()
+    filesToCheck, err := torr.OpenOrCreateFiles()
 	if err != nil {
 		t.Error(err)
 	}
 
-    if !torr.bitfieldContains(p.num) {
+    if err := torr.savePiece(p, currPieceSize); err != nil {
+        t.Error(err)
+    }
+
+	existingPieces, err := torr.CheckExistingPieces(filesToCheck)
+	if err != nil {
+        t.Error(err)
+	}
+
+    if slices.Contains(existingPieces, p.num) {
         t.Fatalf("Expected piece %v to be saved", p.num)
     }
 
@@ -71,7 +89,8 @@ func TestSavePiece(t *testing.T) {
 	}
 }
 
-// Creates random size files and makes the metainfo file from them, thereby returning a completed Torrent
+// Creates random size files and makes the metainfo file from them,
+// thereby returning a completed Torrent.
 // NOTE: Requires having github.com/pobrn/mktorrent/ in your PATH
 func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
 	testDir, err := os.MkdirTemp(".", "torrent_test_")
@@ -84,7 +103,7 @@ func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
 		if err != nil {
             return new(Torrent), err
 		}
-		b := make([]byte, rand.Intn(maxFileSize))
+		b := make([]byte, maxFileSize)
         // So it's distinguishable from an empty file,
         // e.g. we don't get correct=true when checking a piece that hasn't been completed
         for i := 0; i < len(b); i++ {
