@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/esmakov/bittorrent-client/parser"
 	"github.com/esmakov/bittorrent-client/torrent"
@@ -23,6 +24,10 @@ func main() {
 		return
 	}
 	metaInfoFileName := os.Args[2]
+    if filepath.Ext(metaInfoFileName) != ".torrent" {
+        fmt.Println("File is not of type .torrent")
+        return
+    }
 
 	switch os.Args[1] {
 	case "tree":
@@ -49,6 +54,7 @@ func main() {
 		}
 
 		if t.IsComplete() {
+            fmt.Printf("%v is complete, starting to seed...\n", metaInfoFileName)
 			// TODO: Start seeding
 			return
 		}

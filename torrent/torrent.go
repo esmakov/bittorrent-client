@@ -141,6 +141,64 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 	return t, nil
 }
 
+func (t *Torrent) IsComplete() bool {
+    return t.piecesDownloaded == t.numPieces
+}
+
+func updateBitfield(bitfield []byte, pieceNum int) {
+	pieceByteIdx := pieceNum / 8
+	bitsFromRight := 7 - (pieceNum % 8)
+	b := &(bitfield[pieceByteIdx])
+	mask := uint8(0x01) << bitsFromRight
+	*b |= mask
+}
+
+func (t *Torrent) bitfieldContains(pieceNum int) bool {
+	pieceByteIdx := pieceNum / 8
+	bitsFromRight := 7 - (pieceNum % 8)
+	b := t.bitfield[pieceByteIdx]
+	mask := uint8(0x01) << bitsFromRight
+	if b&mask != 0 {
+        return true
+    }
+    return false
+}
+
+func (t *Torrent) SavedPieceNums() (nums []int) {
+    for i:=0; i < len(t.bitfield); i++ {
+		for bitsFromRight := 7; bitsFromRight >= 0; bitsFromRight-- {
+			mask := byte(1 << bitsFromRight)
+			if t.bitfield[i]&mask != 0 {
+                pieceNum := i * 8 + (7-bitsFromRight)
+                nums = append(nums, pieceNum)
+			}
+		}
+    }
+    return
+}
+
+func (t *Torrent) String() string {
+    sb := strings.Builder{}
+    str := fmt.Sprint(
+        fmt.Sprintln("-------------Torrent Info---------------"),
+        fmt.Sprintln("Torrent file:", t.metaInfoFileName),
+        fmt.Sprintln("Tracker:", t.trackerHostname),
+        fmt.Sprintln("Total size: ", t.totalSize),
+        fmt.Sprintf("%v file(s): \n", len(t.files)),
+    )
+
+    sb.WriteString(str)
+    for _, file := range t.files {
+        sb.WriteString(fmt.Sprintf("  %v\n", file.fd.Name()))
+    }
+
+    if t.comment != "" {
+        sb.WriteString(fmt.Sprint("Comment:", t.comment))
+    }
+    return sb.String()
+}
+
+// TODO: Split into two separate funcs?
 func (t *Torrent) CreateAndCheckFiles() error {
 	var filesToCheck []*torrentFile
 	if t.dir != "" {
@@ -258,7 +316,7 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
                             continue
                         }
                         // Could be empty and still correct at this point, if intentionally so
-                        updateBitfield(&t.bitfield, p.num)
+                        updateBitfield(t.bitfield, p.num)
                         t.piecesDownloaded++
                         pieceNums = append(pieceNums, p.num)
                         break
@@ -300,7 +358,7 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
 					continue
 				}
                 // Could be empty and still correct at this point, if intentionally so
-				updateBitfield(&t.bitfield, p.num)
+				updateBitfield(t.bitfield, p.num)
 				t.piecesDownloaded++
 				pieceNums = append(pieceNums, p.num)
 	 			p.num++
@@ -336,7 +394,7 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
                         continue
                     }
                     // Could be empty and still correct at this point, if intentionally so
-                    updateBitfield(&t.bitfield, p.num)
+                    updateBitfield(t.bitfield, p.num)
                     t.piecesDownloaded++
                     pieceNums = append(pieceNums, p.num)
                     break
@@ -354,31 +412,6 @@ func (t *Torrent) checkExistingPieces(files []*torrentFile) ([]int, error) {
 
 	t.lastChecked = time.Now()
 	return pieceNums, nil
-}
-
-func (t *Torrent) IsComplete() bool {
-	return t.piecesDownloaded == t.numPieces
-}
-
-func (t *Torrent) String() string {
-	sb := strings.Builder{}
-	str := fmt.Sprint(
-		fmt.Sprintln("-------------Torrent Info---------------"),
-		fmt.Sprintln("Torrent file:", t.metaInfoFileName),
-		fmt.Sprintln("Tracker:", t.trackerHostname),
-		fmt.Sprintln("Total size: ", t.totalSize),
-		fmt.Sprintf("%v file(s): \n", len(t.files)),
-	)
-
-	sb.WriteString(str)
-	for _, file := range t.files {
-		sb.WriteString(fmt.Sprintf("  %v\n", file.fd.Name()))
-	}
-
-	if t.comment != "" {
-		sb.WriteString(fmt.Sprint("Comment:", t.comment))
-	}
-	return sb.String()
 }
 
 const MAX_PEERS = 1
@@ -585,7 +618,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 					}
 
 					t.storeDownloaded(t.piecesDownloaded + 1)
-					updateBitfield(&t.bitfield, msg.pieceNum)
+					updateBitfield(t.bitfield, msg.pieceNum)
 					fmt.Printf("%b\n", t.bitfield)
 
 					if t.IsComplete() {
@@ -612,7 +645,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 				outboundMsgs <- reqMsg
 				fmt.Printf("Requesting %v bytes for piece %v/%v from %v\n", currBlockSize, p.num, lastPieceNum, peerAddr)
 			case have:
-				updateBitfield(&peerBitfield, msg.pieceNum)
+				updateBitfield(peerBitfield, msg.pieceNum)
 			}
 		}
 	}
@@ -668,14 +701,6 @@ func (t *Torrent) savePiece(p *pieceData, currPieceSize int) error {
 	}
 
 	return nil
-}
-
-func updateBitfield(bitfield *[]byte, pieceNum int) {
-	pieceByteIdx := pieceNum / 8
-	bitsFromRight := 7 - (pieceNum % 8)
-	pieceByte := &((*bitfield)[pieceByteIdx])
-	b := uint8(0x01) << bitsFromRight
-	*pieceByte |= b
 }
 
 func connectAndParse(infoHash, myPeerId []byte, peerAddr string, parsedMessages chan<- peerMessage, outboundMsgs <-chan []byte, signalErrors chan<- error) {
