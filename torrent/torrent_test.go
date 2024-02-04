@@ -11,84 +11,6 @@ import (
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
-func TestCheckExistingPieces(t *testing.T) {
-    torr, err := createTorrentWithTestData(
-        rand.Intn(100),
-        rand.Intn(128 * 1024))
-	if err != nil {
-		t.Error(err)
-	}
-
-    filesToCheck, err := torr.OpenOrCreateFiles()
-	if err != nil {
-		t.Error(err)
-	}
-
-	_, err = torr.CheckExistingPieces(filesToCheck)
-	if err != nil {
-        t.Error(err)
-	}
-
-    if !torr.IsComplete() {
-        t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", torr.piecesDownloaded, torr.numPieces, torr.bitfield)
-    }
-
-	if err := os.RemoveAll(torr.dir); err != nil {
-		t.Error(err)
-	}
-
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
-		t.Error(err)
-	}
-}
-
-func TestSavePiece(t *testing.T) {
-    torr, err := createTorrentWithTestData(
-        3,
-        rand.Intn(128 * 1024))
-	if err := os.RemoveAll(torr.dir); err != nil {
-		t.Error(err)
-	}
-
-	p := NewPieceData(torr.pieceSize)
-    p.num = rand.Intn(torr.numPieces)
-
-    lastPieceSize := torr.totalSize - (torr.numPieces -1 ) * torr.pieceSize
-    currPieceSize := torr.pieceSize
-    if p.num == torr.numPieces - 1 {
-        currPieceSize = lastPieceSize
-    }
-    for i:=0;i<len(p.data);i++ {
-        p.data[i] = 1
-    }
-
-    filesToCheck, err := torr.OpenOrCreateFiles()
-	if err != nil {
-		t.Error(err)
-	}
-
-    if err := torr.savePiece(p, currPieceSize); err != nil {
-        t.Error(err)
-    }
-
-	existingPieces, err := torr.CheckExistingPieces(filesToCheck)
-	if err != nil {
-        t.Error(err)
-	}
-
-    if slices.Contains(existingPieces, p.num) {
-        t.Fatalf("Expected piece %v to be saved", p.num)
-    }
-
-	if err := os.RemoveAll(torr.dir); err != nil {
-		t.Error(err)
-	}
-
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
-		t.Error(err)
-	}
-}
-
 // Creates random size files and makes the metainfo file from them,
 // thereby returning a completed Torrent.
 // NOTE: Requires having github.com/pobrn/mktorrent/ in your PATH
@@ -141,6 +63,165 @@ func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
 	}
 
     return torr, nil
+}
+
+func TestCheckExistingPieces(t *testing.T) {
+    torr, err := createTorrentWithTestData(
+        rand.Intn(100),
+        rand.Intn(32 * 1024))
+	if err != nil {
+		t.Error(err)
+	}
+
+    filesToCheck, err := torr.OpenOrCreateFiles()
+	if err != nil {
+		t.Error(err)
+	}
+
+	_, err = torr.CheckExistingPieces(filesToCheck)
+	if err != nil {
+        t.Error(err)
+	}
+
+    if !torr.IsComplete() {
+        t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", torr.piecesDownloaded, torr.numPieces, torr.bitfield)
+    }
+
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Error(err)
+	}
+
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSavePiece(t *testing.T) {
+    torr, err := createTorrentWithTestData(
+        3,
+        rand.Intn(32 * 1024))
+    if err != nil {
+        t.Error(err)
+    }
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Error(err)
+	}
+
+	p := NewPieceData(torr.pieceSize)
+    p.num = rand.Intn(torr.numPieces)
+
+    for i:=0;i<len(p.data);i++ {
+        p.data[i] = 1
+    }
+
+    filesToCheck, err := torr.OpenOrCreateFiles()
+	if err != nil {
+		t.Error(err)
+	}
+
+    if err := torr.savePiece(p); err != nil {
+        t.Error(err)
+    }
+
+	existingPieces, err := torr.CheckExistingPieces(filesToCheck)
+	if err != nil {
+        t.Error(err)
+	}
+
+    if slices.Contains(existingPieces, p.num) {
+        t.Fatalf("Expected piece %v to be saved", p.num)
+    }
+
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Error(err)
+	}
+
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestGetPieceFromDisk2(t *testing.T) {
+    torr, err := createTorrentWithTestData(
+        3,
+        rand.Intn(32 * 1024))
+    if err != nil {
+        t.Error(err)
+    }
+
+    _, err = torr.OpenOrCreateFiles()
+    if err != nil {
+        t.Error(err)
+    }
+
+    // pieceNum := rand.Intn(torr.numPieces)
+    pieceNum := 0
+
+    currPieceSize := torr.pieceSize
+    if pieceNum == torr.numPieces-1 {
+		currPieceSize = torr.totalSize - pieceNum*torr.pieceSize
+    }
+    p := NewPieceData(currPieceSize)
+    p.num = pieceNum
+    err = torr.getPieceFromDisk2(p)
+    if err != nil {
+        t.Error(err)
+    }
+
+    correct, err := torr.checkPieceHash(*p)
+    if err != nil {
+        t.Error(err)
+    }
+
+    if !correct {
+        t.Fatalf("Piece %v failed hash check", p.num)
+    }
+
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Error(err)
+	}
+
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestGetPieceFromDisk(t *testing.T) {
+    torr, err := createTorrentWithTestData(
+        3,
+        rand.Intn(32 * 1024))
+    if err != nil {
+        t.Error(err)
+    }
+
+    _, err = torr.OpenOrCreateFiles()
+    if err != nil {
+        t.Error(err)
+    }
+
+    // pieceNum := rand.Intn(torr.numPieces)
+    pieceNum := 0
+    p, err := torr.getPieceFromDisk(pieceNum)
+    if err != nil {
+        t.Error(err)
+    }
+
+    correct, err := torr.checkPieceHash(*p)
+    if err != nil {
+        t.Error(err)
+    }
+
+    if !correct {
+        t.Fatalf("Piece %v failed hash check", p.num)
+    }
+
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Error(err)
+	}
+
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Error(err)
+	}
 }
 
 func TestNextAvailablePieceIdx(t *testing.T) {}
