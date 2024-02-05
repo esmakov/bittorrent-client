@@ -142,7 +142,7 @@ func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (
 }
 
 func (t *Torrent) IsComplete() bool {
-    return t.piecesDownloaded == t.numPieces
+	return t.piecesDownloaded == t.numPieces
 }
 
 func updateBitfield(bitfield []byte, pieceNum int) {
@@ -159,43 +159,43 @@ func (t *Torrent) bitfieldContains(pieceNum int) bool {
 	b := t.bitfield[pieceByteIdx]
 	mask := uint8(0x01) << bitsFromRight
 	if b&mask != 0 {
-        return true
-    }
-    return false
+		return true
+	}
+	return false
 }
 
 func (t *Torrent) SavedPieceNums() (nums []int) {
-    for i:=0; i < len(t.bitfield); i++ {
+	for i := 0; i < len(t.bitfield); i++ {
 		for bitsFromRight := 7; bitsFromRight >= 0; bitsFromRight-- {
 			mask := byte(1 << bitsFromRight)
 			if t.bitfield[i]&mask != 0 {
-                pieceNum := i * 8 + (7-bitsFromRight)
-                nums = append(nums, pieceNum)
+				pieceNum := i*8 + (7 - bitsFromRight)
+				nums = append(nums, pieceNum)
 			}
 		}
-    }
-    return
+	}
+	return
 }
 
 func (t *Torrent) String() string {
-    sb := strings.Builder{}
-    str := fmt.Sprint(
-        fmt.Sprintln("-------------Torrent Info---------------"),
-        fmt.Sprintln("Torrent file:", t.metaInfoFileName),
-        fmt.Sprintln("Tracker:", t.trackerHostname),
-        fmt.Sprintln("Total size: ", t.totalSize),
-        fmt.Sprintf("%v file(s): \n", len(t.files)),
-    )
+	sb := strings.Builder{}
+	str := fmt.Sprint(
+		fmt.Sprintln("-------------Torrent Info---------------"),
+		fmt.Sprintln("Torrent file:", t.metaInfoFileName),
+		fmt.Sprintln("Tracker:", t.trackerHostname),
+		fmt.Sprintln("Total size: ", t.totalSize),
+		fmt.Sprintf("%v file(s): \n", len(t.files)),
+	)
 
-    sb.WriteString(str)
-    for _, file := range t.files {
-        sb.WriteString(fmt.Sprintf("  %v\n", file.fd.Name()))
-    }
+	sb.WriteString(str)
+	for _, file := range t.files {
+		sb.WriteString(fmt.Sprintf("  %v\n", file.fd.Name()))
+	}
 
-    if t.comment != "" {
-        sb.WriteString(fmt.Sprint("Comment:", t.comment))
-    }
-    return sb.String()
+	if t.comment != "" {
+		sb.WriteString(fmt.Sprint("Comment:", t.comment))
+	}
+	return sb.String()
 }
 
 func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
@@ -216,7 +216,7 @@ func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
 			}
 			tf.fd = fd
 		} else if err != nil {
-				return nil, err
+			return nil, err
 		} else {
 			tf.fd = fd
 			fi, err := os.Stat(tf.fd.Name())
@@ -233,178 +233,6 @@ func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
 	}
 
 	return filesToCheck, nil
-}
-
-func (t *Torrent) CheckExistingPieces(files []*torrentFile) ([]int, error) {
-	fmt.Println("Checking...")
-
-	p := NewPieceData(t.pieceSize)
-	var pieceNums []int
-
-	// All indices are relative to the "stream" of pieces and may cross file boundaries
-	fileStartIdx := int64(0)
-	remainingPieceSize := t.pieceSize
-    startReadAt := 0
-
-	for i := 0; i < len(files); i++ {
-		currFile := files[i]
-		fileEndIdx := fileStartIdx + currFile.finalSize
-
-		fi, err := os.Stat(currFile.path)
-		if err != nil {
-			return nil, err
-		}
-
-		for {
-			pieceStartIdx := int64(p.num * t.pieceSize)
-			pieceEndIdx := pieceStartIdx + int64(t.pieceSize)
-			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
-
-			if pieceOffsetIntoFile < 0 {
-				pieceOffsetIntoFile = 0
-			}
-
-			if fi.Size() < currFile.finalSize {
-				if pieceOffsetIntoFile >= fi.Size() {
-					fileStartIdx += currFile.finalSize
-					break
-				}
-			} else {
-				if pieceOffsetIntoFile >= currFile.finalSize {
-					break
-				}
-			}
-
-			bytesFromEnd := fileEndIdx - pieceStartIdx
-			if (pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx) || remainingPieceSize < t.pieceSize {
-                if remainingPieceSize < t.pieceSize {
-                    readSize := min(int(currFile.finalSize), remainingPieceSize)
-                    if pieceOffsetIntoFile != 0 {
-                        panic("Interesting if this happens")
-                    }
-                    if _, err := currFile.fd.ReadAt(p.data[startReadAt:startReadAt+readSize], 0); err != nil {
-                        return nil, err
-                    }
-                    remainingPieceSize -= readSize
-                    startReadAt += readSize
-                    if remainingPieceSize < 0 {
-                        panic("remainingPieceSize < 0")
-                    }
-
-                    if p.num == t.numPieces - 1 && i == len(t.files) -1 {
-                        // Last one!
-                        empty := slices.Max(p.data) == 0
-
-                        correct, err := t.checkPieceHash(*p)
-                        if err != nil {
-                            return nil, err
-                        }
-
-                        if !correct {
-                            if !empty {
-                                return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
-                            }
-                            // Hasn't been downloaded yet
-                            p.num++
-                            continue
-                        }
-                        // Could be empty and still correct at this point, if intentionally so
-                        updateBitfield(t.bitfield, p.num)
-                        t.piecesDownloaded++
-                        pieceNums = append(pieceNums, p.num)
-                        break
-                    }
-
-                    if remainingPieceSize > 0 {
-                        // Move on to yet another (at least a third) file to finish this piece
-                        fileStartIdx += currFile.finalSize
-                        break
-                    }
-
-                    if remainingPieceSize == 0 {
-                        // Ready to be checked below
-                        if startReadAt != t.pieceSize {
-                            panic("Piece fragments do not add up to a whole piece")
-                         }
-                        remainingPieceSize = t.pieceSize
-                        startReadAt = 0
-                    }
-				} else {
-					if _, err := currFile.fd.ReadAt(p.data, pieceOffsetIntoFile); err != nil {
-						return nil, err
-					}
-				}
-
-				empty := slices.Max(p.data) == 0
-
-				correct, err := t.checkPieceHash(*p)
-				if err != nil {
-					return nil, err
-				}
-
-				if !correct {
-					if !empty {
-                        return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
-					}
-                    // Hasn't been downloaded yet
-					p.num++
-					continue
-				}
-                // Could be empty and still correct at this point, if intentionally so
-				updateBitfield(t.bitfield, p.num)
-				t.piecesDownloaded++
-				pieceNums = append(pieceNums, p.num)
-	 			p.num++
-
-                // So we don't get correct=true when checking a piece that hasn't been completed
-                clear(p.data)
-			} else if pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx {
-				// Piece must cross file boundary
-
-                if pieceStartIdx < fileStartIdx {
-                    panic("bytesFromEnd will be calculated too high")
-                }
-
-				if _, err := currFile.fd.ReadAt(p.data[:bytesFromEnd], pieceOffsetIntoFile); err != nil {
-					return nil, err
-				}
-
-                if p.num == t.numPieces - 1 && i == len(t.files) -1 {
-                    // Last one!
-                    empty := slices.Max(p.data) == 0
-
-                    correct, err := t.checkPieceHash(*p)
-                    if err != nil {
-                        return nil, err
-                    }
-
-                    if !correct {
-                        if !empty {
-                            return nil, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
-                        }
-                        // Hasn't been downloaded yet
-                        p.num++
-                        continue
-                    }
-                    // Could be empty and still correct at this point, if intentionally so
-                    updateBitfield(t.bitfield, p.num)
-                    t.piecesDownloaded++
-                    pieceNums = append(pieceNums, p.num)
-                    break
-                }
-
-				remainingPieceSize = int(bytesFromEnd)
-				startReadAt += int(bytesFromEnd)
-                fileStartIdx += currFile.finalSize
-				break
-			} else {
-				panic("Unreachable")
-			}
-		}
-	}
-
-	t.lastChecked = time.Now()
-	return pieceNums, nil
 }
 
 const MAX_PEERS = 1
@@ -495,17 +323,17 @@ func NewPieceData(pieceLen int) *pieceData {
 	return &pieceData{data: data}
 }
 
-func (p *pieceData) storeBlock(msg peerMessage, blockSize int) {
+func (p *pieceData) storeBlockIntoPiece(msg peerMessage, blockSize int) {
 	block := p.data[msg.blockOffset : msg.blockOffset+blockSize]
 	// TODO: Don't copy each block twice
 	copy(block, msg.blockData)
 }
 
-func (t *Torrent) checkPieceHash(p pieceData) (bool, error) {
-    currPieceSize := t.pieceSize
-    if p.num == t.numPieces - 1 {
+func (t *Torrent) checkPieceHash(p *pieceData) (bool, error) {
+	currPieceSize := t.pieceSize
+	if p.num == t.numPieces-1 {
 		currPieceSize = t.totalSize - p.num*t.pieceSize
-    }
+	}
 	givenHash, err := hash.HashSHA1(p.data[:currPieceSize])
 	if err != nil {
 		return false, err
@@ -530,8 +358,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 	lastBlockOffset := (numBlocks - 1) * BLOCK_SIZE
 	currBlockSize := BLOCK_SIZE
 	currPieceSize := t.pieceSize
-    p := NewPieceData(t.pieceSize)
-    lastPieceNum := t.numPieces - 1
+	p := NewPieceData(t.pieceSize)
 
 	for {
 		select {
@@ -544,10 +371,10 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 			case handshake:
 				// fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
 			case request:
-                // check if we have the piece
-                // getPieceFromDisk
-                // break piece into chunks
-                // send a message for each chunk
+				// check if we have the piece
+				// getPieceFromDisk
+				// break piece into chunks
+				// send a message for each chunk
 			case keepalive:
 			case choke:
 				connState.peer_choking = true
@@ -577,11 +404,11 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 
 				reqMsg := createRequestMsg(p.num, blockOffset, BLOCK_SIZE)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Requesting piece %v/%v from %v\n", p.num, lastPieceNum, peerAddr)
+				fmt.Printf("Requesting piece %v from %v\n", p.num, peerAddr)
 			case piece:
-				p.storeBlock(msg, currBlockSize)
+				p.storeBlockIntoPiece(msg, currBlockSize)
 
-				if p.num == lastPieceNum {
+				if p.num == t.numPieces-1 {
 					currPieceSize = t.totalSize - p.num*t.pieceSize
 					numBlocks = int(math.Ceil(float64(currPieceSize) / float64(BLOCK_SIZE)))
 					lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
@@ -596,7 +423,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 					fmt.Println(blockOffset, "/", currPieceSize, "bytes")
 				} else {
 					fmt.Printf("Completed piece %v, checking...\n", p.num)
-					correct, err := t.checkPieceHash(*p)
+					correct, err := t.checkPieceHash(p)
 					if err != nil {
 						signalErrors <- err
 						return
@@ -609,7 +436,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 						return
 					}
 
-				    if err = t.savePiece(p); err != nil {
+					if err = t.savePieceToDisk(p); err != nil {
 						signalErrors <- err
 						return
 					}
@@ -640,7 +467,7 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 
 				reqMsg := createRequestMsg(p.num, blockOffset, currBlockSize)
 				outboundMsgs <- reqMsg
-				fmt.Printf("Requesting %v bytes for piece %v/%v from %v\n", currBlockSize, p.num, lastPieceNum, peerAddr)
+				fmt.Printf("Requesting %v bytes for piece %v from %v\n", currBlockSize, p.num, peerAddr)
 			case have:
 				updateBitfield(peerBitfield, msg.pieceNum)
 			}
@@ -648,176 +475,158 @@ func handleConnection(t *Torrent, myPeerId []byte, peerAddr string, signalErrors
 	}
 }
 
-func (t *Torrent) getPieceFromDisk2(p *pieceData) error {
-    currPieceSize := t.pieceSize
-    if p.num == t.numPieces - 1 {
+var PieceNotDownloadedErr error = errors.New("Piece not downloaded yet")
+
+func (t *Torrent) CheckAllPieces(files []*torrentFile) ([]int, error) {
+	p := NewPieceData(t.pieceSize)
+	var existingPieces []int
+
+	for i := 0; i < t.numPieces; i++ {
+		p.num = i
+		err := t.getPieceFromDisk(p)
+		if err == PieceNotDownloadedErr {
+			continue
+		} else if err != nil {
+			return existingPieces, err
+		}
+
+		empty := slices.Max(p.data) == 0
+
+		correct, err := t.checkPieceHash(p)
+		if err != nil {
+			return existingPieces, err
+		}
+
+		if !correct {
+			// TODO: Can be removed since PieceNotDownloadedErr now signals this
+			if !empty {
+				return existingPieces, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
+			}
+			// Hasn't been downloaded yet
+			continue
+		}
+
+		// Could be empty and still correct at this point, if intentionally so
+		updateBitfield(t.bitfield, p.num)
+		t.piecesDownloaded++
+		existingPieces = append(existingPieces, p.num)
+		clear(p.data)
+	}
+
+	t.lastChecked = time.Now()
+	return existingPieces, nil
+}
+
+func (t *Torrent) getPieceFromDisk(p *pieceData) error {
+	currPieceSize := t.pieceSize
+	if p.num == t.numPieces-1 {
 		currPieceSize = t.totalSize - p.num*t.pieceSize
-    }
+	}
 	pieceStartIdx := int64(p.num * t.pieceSize)
 	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
 	if len(t.files) == 1 {
 		_, err := t.files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
-        return err
+		return err
 	}
 
 	// All indices are relative to the "stream" of pieces and may cross file boundaries
 	fileStartIdx := int64(0)
 	remainingPieceSize := currPieceSize
-    startReadAt := 0
+	startReadAt := 0
 
 	for i := 0; i < len(t.files); i++ {
 		currFile := t.files[i]
 		fileEndIdx := fileStartIdx + currFile.finalSize
 
-        if pieceStartIdx > fileEndIdx {
-            fileStartIdx += currFile.finalSize
-            continue
-        }
+		if pieceStartIdx > fileEndIdx {
+			fileStartIdx += currFile.finalSize
+			continue
+		}
 
 		fileInfo, err := os.Stat(currFile.path)
 		if err != nil {
 			return err
 		}
 
-        for {
-            pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
-            bytesFromEOF := fileEndIdx - pieceStartIdx
+		for {
+			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
+			bytesFromEOF := fileEndIdx - pieceStartIdx
 
-            if pieceOffsetIntoFile < 0 {
-                pieceOffsetIntoFile = 0
-            }
-
-            if fileInfo.Size() < currFile.finalSize {
-                if pieceOffsetIntoFile >= fileInfo.Size() {
-                    fmt.Printf("Piece %v hasn't been downloaded yet, can't retrieve\n", p.num)
-                    fileStartIdx += currFile.finalSize
-                    break
-                }
-            } else {
-                // pieceStartIdx - fileStartIdx >= currFile.finalSize
-                if pieceOffsetIntoFile >= currFile.finalSize {
-                    break
-                }
-            }
-
-            if (pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx) || remainingPieceSize < currPieceSize {
-                if remainingPieceSize < currPieceSize {
-                    readSize := min(int(currFile.finalSize), remainingPieceSize)
-                    if pieceOffsetIntoFile != 0 {
-                        panic("Interesting if this happens")
-                    }
-                    if _, err := currFile.fd.ReadAt(p.data[startReadAt:startReadAt+readSize], 0); err != nil {
-                        return err
-                    }
-                    remainingPieceSize -= readSize
-                    startReadAt += readSize
-                    if remainingPieceSize < 0 {
-                        panic("remainingPieceSize < 0")
-                    }
-
-                    if remainingPieceSize > 0 {
-                        // Move on to yet another (at least a third) file to finish this piece
-                        fileStartIdx += currFile.finalSize
-                        break
-                    }
-
-                    if startReadAt != currPieceSize {
-                        panic("Piece fragments do not add up to a whole piece")
-                     }
-
-                } else {
-                    if _, err := currFile.fd.ReadAt(p.data, pieceOffsetIntoFile); err != nil {
-                        return err
-                    }
-                }
-
-                return nil
-            } else if pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx {
-                // Piece must cross file boundary
-
-                if pieceStartIdx < fileStartIdx {
-                    panic("bytesFromEnd will be calculated too high")
-                }
-
-                // TODO: Shouldn't have to subslice as long as the caller calls NewPieceData with correct size
-                if _, err := currFile.fd.ReadAt(p.data[:bytesFromEOF], pieceOffsetIntoFile); err != nil {
-                    return err
-                }
-
-                remainingPieceSize -= int(bytesFromEOF)
-                startReadAt += int(bytesFromEOF)
-                fileStartIdx += currFile.finalSize
-                break
-            } else {
-                panic("Unreachable")
-            }
-        }
-    }
-
-    return nil
-}
-
-func (t *Torrent) getPieceFromDisk(pieceNum int) (*pieceData, error) {
-    currPieceSize := t.pieceSize
-    if pieceNum == t.numPieces - 1 {
-		currPieceSize = t.totalSize - pieceNum*t.pieceSize
-    }
-	pieceStartIdx := int64(pieceNum * t.pieceSize)
-	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
-
-    p := NewPieceData(currPieceSize)
-    p.num = pieceNum
-
-	if len(t.files) == 1 {
-		_, err := t.files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
-        return nil, err
-	}
-
-	fileStartIdx := int64(0)
-
-	for i := 0; i < len(t.files); i++ {
-		currFile := t.files[i]
-		currFd := currFile.fd
-		fileEndIdx := fileStartIdx + currFile.finalSize
-        pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
-
-        if pieceStartIdx >= fileEndIdx {
-            fileStartIdx += currFile.finalSize
-        } else if pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx {
-			_, err := currFd.ReadAt(p.data[:currPieceSize], pieceOffsetIntoFile)
-            return p, err
-		} else {
-            // Piece crosses file boundary
-			nextFile := t.files[i+1]
-			nextFd := nextFile.fd
-
-			boundaryIdx := fileEndIdx - pieceStartIdx
-			leftHalf := p.data[:boundaryIdx]
-			rightHalf := p.data[boundaryIdx:]
-
-			_, err := currFd.ReadAt(leftHalf, pieceOffsetIntoFile)
-			if err != nil {
-                return p, nil
+			if fileInfo.Size() < currFile.finalSize {
+				if pieceOffsetIntoFile >= fileInfo.Size() {
+					return PieceNotDownloadedErr
+				}
+			} else {
+				// Why?
+				// pieceStartIdx - fileStartIdx >= currFile.finalSize
+				// pieceStartIdx >= fileStartIdx + currFile.finalSize
+				// pieceStartIdx >= fileEndIdx
+				// ^ handled above, why reach here?
+				if pieceOffsetIntoFile >= currFile.finalSize {
+					break
+				}
 			}
 
-			_, err = nextFd.ReadAt(rightHalf, 0)
-			// if err != nil {
-                // return p, nil
-			// }
+			if (pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx) || remainingPieceSize < currPieceSize {
+				if remainingPieceSize < currPieceSize {
+					readSize := min(int(currFile.finalSize), remainingPieceSize)
+					if _, err := currFile.fd.ReadAt(p.data[startReadAt:startReadAt+readSize], 0); err != nil {
+						return err
+					}
+					remainingPieceSize -= readSize
+					startReadAt += readSize
+					if remainingPieceSize < 0 {
+						panic("remainingPieceSize < 0")
+					}
 
-            return p, nil
+					if remainingPieceSize > 0 {
+						// Move on to yet another (at least a third) file to finish this piece
+						fileStartIdx += currFile.finalSize
+						break
+					}
+
+					if startReadAt != currPieceSize {
+						panic("Piece fragments do not add up to a whole piece")
+					}
+
+				} else {
+					if _, err := currFile.fd.ReadAt(p.data[:currPieceSize], pieceOffsetIntoFile); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			} else if pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx {
+				// Piece crosses file boundary
+
+				if pieceStartIdx < fileStartIdx {
+					panic("bytesFromEnd will be calculated too high")
+				}
+
+				// TODO: Shouldn't have to subslice as long as the caller calls NewPieceData with correct size
+				if _, err := currFile.fd.ReadAt(p.data[:bytesFromEOF], pieceOffsetIntoFile); err != nil {
+					return err
+				}
+
+				remainingPieceSize -= int(bytesFromEOF)
+				startReadAt += int(bytesFromEOF)
+				fileStartIdx += currFile.finalSize
+				break
+			} else {
+				panic("Unreachable")
+			}
 		}
 	}
 
-    return p, nil
+	return nil
 }
 
-func (t *Torrent) savePiece(p *pieceData) error {
-    currPieceSize := t.pieceSize
-    if p.num == t.numPieces - 1 {
+func (t *Torrent) savePieceToDisk(p *pieceData) error {
+	currPieceSize := t.pieceSize
+	if p.num == t.numPieces-1 {
 		currPieceSize = t.totalSize - p.num*t.pieceSize
-    }
+	}
 	pieceStartIdx := int64(p.num * t.pieceSize)
 	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
@@ -826,44 +635,95 @@ func (t *Torrent) savePiece(p *pieceData) error {
 		return err
 	}
 
-	// "For the purposes of piece boundaries in the multi-file case, consider the file data
-	// as one long continuous stream, composed of the concatenation of each file in the order
-	// listed in the files list. The number of pieces and their boundaries are then determined
-	// in the same manner as the case of a single file. Pieces may overlap file boundaries."
-
+	// All indices are relative to the "stream" of pieces and may cross file boundaries
 	fileStartIdx := int64(0)
+	remainingPieceSize := currPieceSize
+	startWriteAt := 0
 
 	for i := 0; i < len(t.files); i++ {
 		currFile := t.files[i]
-		currFd := currFile.fd
 		fileEndIdx := fileStartIdx + currFile.finalSize
-        pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
 
-        if pieceStartIdx >= fileEndIdx {
-            fileStartIdx += currFile.finalSize
-        } else if pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx {
-			_, err := currFd.WriteAt(p.data[:currPieceSize], pieceOffsetIntoFile)
+		if pieceStartIdx > fileEndIdx {
+			fileStartIdx += currFile.finalSize
+			continue
+		}
+
+		fileInfo, err := os.Stat(currFile.path)
+		if err != nil {
 			return err
-		} else {
-            // Piece crosses file boundary
-			nextFile := t.files[i+1]
-			nextFd := nextFile.fd
+		}
 
-			boundaryIdx := fileEndIdx - pieceStartIdx
-			leftHalf := p.data[:boundaryIdx]
-			rightHalf := p.data[boundaryIdx:]
+		for {
+			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
+			bytesFromEOF := fileEndIdx - pieceStartIdx
 
-			_, err := currFd.WriteAt(leftHalf, pieceOffsetIntoFile)
-			if err != nil {
-				return err
+			if pieceOffsetIntoFile < 0 {
+				pieceOffsetIntoFile = 0
 			}
 
-			_, err = nextFd.WriteAt(rightHalf, 0)
-			if err != nil {
-				return err
+			if fileInfo.Size() >= currFile.finalSize {
+				// Why?
+				// pieceStartIdx - fileStartIdx >= currFile.finalSize
+				// pieceStartIdx >= fileStartIdx + currFile.finalSize
+				// pieceStartIdx >= fileEndIdx
+				// ^ handled above, why reach here?
+				if pieceOffsetIntoFile >= currFile.finalSize {
+					break
+				}
 			}
 
-			return nil
+			if (pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx) || remainingPieceSize < currPieceSize {
+				if remainingPieceSize < currPieceSize {
+					writeSize := min(int(currFile.finalSize), remainingPieceSize)
+					if pieceOffsetIntoFile != 0 {
+						panic("Interesting if this happens")
+					}
+					if _, err := currFile.fd.WriteAt(p.data[startWriteAt:startWriteAt+writeSize], 0); err != nil {
+						return err
+					}
+					remainingPieceSize -= writeSize
+					startWriteAt += writeSize
+					if remainingPieceSize < 0 {
+						panic("remainingPieceSize < 0")
+					}
+
+					if remainingPieceSize > 0 {
+						// Move on to yet another (at least a third) file to finish this piece
+						fileStartIdx += currFile.finalSize
+						break
+					}
+
+					if startWriteAt != currPieceSize {
+						panic("Piece fragments do not add up to a whole piece")
+					}
+
+				} else {
+					if _, err := currFile.fd.WriteAt(p.data[:currPieceSize], pieceOffsetIntoFile); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			} else if pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx {
+				// Piece crosses file boundary
+
+				if pieceStartIdx < fileStartIdx {
+					panic("bytesFromEnd will be calculated too high")
+				}
+
+				// TODO: Shouldn't have to subslice as long as the caller calls NewPieceData with correct size
+				if _, err := currFile.fd.WriteAt(p.data[:bytesFromEOF], pieceOffsetIntoFile); err != nil {
+					return err
+				}
+
+				remainingPieceSize -= int(bytesFromEOF)
+				startWriteAt += int(bytesFromEOF)
+				fileStartIdx += currFile.finalSize
+				break
+			} else {
+				panic("Unreachable")
+			}
 		}
 	}
 

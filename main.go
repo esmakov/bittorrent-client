@@ -24,10 +24,10 @@ func main() {
 		return
 	}
 	metaInfoFileName := os.Args[2]
-    if filepath.Ext(metaInfoFileName) != ".torrent" {
-        fmt.Println("File is not of type .torrent")
-        return
-    }
+	if filepath.Ext(metaInfoFileName) != ".torrent" {
+		fmt.Println("File is not of type .torrent")
+		return
+	}
 
 	switch os.Args[1] {
 	case "tree":
@@ -54,7 +54,7 @@ func main() {
 		}
 
 		if t.IsComplete() {
-            fmt.Printf("%v is complete, starting to seed...\n", metaInfoFileName)
+			fmt.Printf("%v is complete, starting to seed...\n", metaInfoFileName)
 			// TODO: Start seeding
 			return
 		}
@@ -90,14 +90,16 @@ func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torre
 		return nil, err
 	}
 
-    filesToCheck, err := t.OpenOrCreateFiles()
+	filesToCheck, err := t.OpenOrCreateFiles()
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = t.CheckExistingPieces(filesToCheck)
+	fmt.Println("Checking...")
+
+	_, err = t.CheckAllPieces(filesToCheck)
 	if err != nil {
-        return nil, err
+		return nil, err
 	}
 
 	return t, nil
