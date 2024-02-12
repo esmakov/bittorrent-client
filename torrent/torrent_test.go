@@ -193,4 +193,51 @@ func TestGetPieceFromDisk(t *testing.T) {
 	}
 }
 
+func TestSplitIntoBlocks(t *testing.T) {
+	torr, err := createTorrentWithTestData(
+		3,
+		rand.Intn(32*1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = torr.OpenOrCreateFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pieceNum := rand.Intn(torr.numPieces)
+
+	currPieceSize := torr.pieceSize
+	if pieceNum == torr.numPieces-1 {
+		currPieceSize = torr.totalSize - pieceNum*torr.pieceSize
+	}
+	p := NewPieceData(currPieceSize)
+	p.num = pieceNum
+	err = torr.getPieceFromDisk(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blocks := p.splitIntoBlocks(torr, BLOCK_SIZE)
+	remadePiece := concatMultipleSlices(blocks)
+	p.data = remadePiece
+	correct, err := torr.checkPieceHash(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !correct {
+		t.Fatalf("Piece %v failed hash check", p.num)
+	}
+
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNextAvailablePieceIdx(t *testing.T) {}

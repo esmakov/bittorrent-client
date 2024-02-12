@@ -30,7 +30,6 @@ func NewStack[T any]() Stack[T] {
 
 			res := slice[len(slice)-1]
 			return res
-
 		},
 		Length: func() int {
 			return len(slice)
