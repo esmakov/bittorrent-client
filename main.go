@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/esmakov/bittorrent-client/parser"
 	"github.com/esmakov/bittorrent-client/torrent"
 )
 
@@ -36,7 +35,7 @@ func main() {
 			return
 		}
 
-		_, err := addTorrent(metaInfoFileName, true)
+		_, err := torrent.New(metaInfoFileName, true)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -47,7 +46,7 @@ func main() {
 			return
 		}
 
-		t, err := addTorrent(metaInfoFileName, false)
+		t, err := openAndCreateTorrent(metaInfoFileName, false)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -72,20 +71,8 @@ func main() {
 	return
 }
 
-func addTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torrent, error) {
-	fileBytes, err := os.ReadFile(metaInfoFileName)
-	if err != nil {
-		return nil, err
-	}
-
-	p := parser.New(shouldPrettyPrint)
-
-	topLevelMap, infoHash, err := p.ParseMetaInfoFile(fileBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	t, err := torrent.New(metaInfoFileName, topLevelMap, infoHash)
+func openAndCreateTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torrent, error) {
+	t, err := torrent.New(metaInfoFileName, shouldPrettyPrint)
 	if err != nil {
 		return nil, err
 	}

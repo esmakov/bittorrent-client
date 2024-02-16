@@ -56,7 +56,19 @@ type torrentFile struct {
 	// TODO: wanted bool
 }
 
-func New(metaInfoFileName string, metaInfoMap map[string]any, infoHash []byte) (*Torrent, error) {
+func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
+	fileBytes, err := os.ReadFile(metaInfoFileName)
+	if err != nil {
+		return nil, err
+	}
+
+	p := parser.New(shouldPrettyPrint)
+
+	metaInfoMap, infoHash, err := p.ParseMetaInfoFile(fileBytes)
+	if err != nil {
+		return nil, err
+	}
+
 	// Fields common to single-file and multi-file torrents
 	announce := ""
 	if bAnnounce, ok := metaInfoMap["announce"]; ok {
@@ -184,21 +196,24 @@ func (t *Torrent) SavedPieceNums() (nums []int) {
 
 func (t *Torrent) String() string {
 	sb := strings.Builder{}
-	str := fmt.Sprint(
-		fmt.Sprintln("-------------Torrent Info---------------"),
+	if t.isPrivate {
+		sb.WriteString(fmt.Sprint("PRIVATE TORRENT"))
+	}
+
+	sb.WriteString(fmt.Sprint(
+		fmt.Sprintln("--------------Torrent Info--------------"),
 		fmt.Sprintln("Torrent file:", t.metaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
 		fmt.Sprintln("Total size: ", t.totalSize),
 		fmt.Sprintf("%v file(s): \n", len(t.files)),
-	)
+	))
 
-	sb.WriteString(str)
 	for _, file := range t.files {
 		sb.WriteString(fmt.Sprintf("  %v\n", file.fd.Name()))
 	}
 
 	if t.comment != "" {
-		sb.WriteString(fmt.Sprint("Comment:", t.comment))
+		sb.WriteString(fmt.Sprintln("Comment:", t.comment))
 	}
 	return sb.String()
 }
@@ -377,7 +392,7 @@ func (t *Torrent) checkPieceHash(p *pieceData) (bool, error) {
 var PieceNotDownloadedErr error = errors.New("Piece not downloaded yet")
 
 func (t *Torrent) CheckAllPieces(files []*torrentFile) ([]int, error) {
-	p := NewPieceData(t.pieceSize)
+	p := newPieceData(t.pieceSize)
 	var existingPieces []int
 
 	for i := 0; i < t.numPieces; i++ {
@@ -642,7 +657,7 @@ type pieceData struct {
 	data []byte
 }
 
-func NewPieceData(pieceLen int) *pieceData {
+func newPieceData(pieceLen int) *pieceData {
 	data := make([]byte, pieceLen)
 	return &pieceData{data: data}
 }
@@ -689,7 +704,7 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 	lastBlockOffset := (numBlocks - 1) * BLOCK_SIZE
 	currBlockSize := BLOCK_SIZE
 	currPieceSize := t.pieceSize
-	p := NewPieceData(t.pieceSize)
+	p := newPieceData(t.pieceSize)
 
 	for {
 		select {
@@ -704,25 +719,10 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 				outboundMsgs <- createBitfieldMsg(t.bitfield)
 				outboundMsgs <- createUnchokeMsg()
 			case request:
-				havePiece := bitfieldContains(t.bitfield, msg.pieceNum)
-				if !havePiece {
-					outboundMsgs <- createChokeMsg()
+				err := t.retrieveAndSendPiece(msg.pieceNum, msg.blockSize, outboundMsgs)
+				if err != nil {
 					// Drop connection?
 					continue
-				}
-				currPieceSize := t.pieceSize
-				if msg.pieceNum == t.numPieces-1 {
-					currPieceSize = t.totalSize - msg.pieceNum*t.pieceSize
-				}
-				pieceToSend := NewPieceData(currPieceSize)
-				t.getPieceFromDisk(pieceToSend)
-				blocks := p.splitIntoBlocks(t, msg.blockSize)
-				fmt.Println(blocks)
-
-				offset := 0
-				for _, block := range blocks {
-					outboundMsgs <- createPieceMsg(msg.pieceNum, offset, block)
-					offset += msg.blockSize
 				}
 			case keepalive:
 			case choke:
@@ -822,6 +822,31 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 			}
 		}
 	}
+}
+
+func (t *Torrent) retrieveAndSendPiece(pieceNum int, blockSize int, outboundMsgs chan []byte) error {
+	havePiece := bitfieldContains(t.bitfield, pieceNum)
+	if !havePiece {
+		outboundMsgs <- createChokeMsg()
+		return PieceNotDownloadedErr
+	}
+
+	currPieceSize := t.pieceSize
+	if pieceNum == t.numPieces-1 {
+		currPieceSize = t.totalSize - pieceNum*t.pieceSize
+	}
+
+	p := newPieceData(currPieceSize)
+	t.getPieceFromDisk(p)
+	blocks := p.splitIntoBlocks(t, blockSize)
+
+	offset := 0
+	for _, block := range blocks {
+		outboundMsgs <- createPieceMsg(pieceNum, offset, block)
+		offset += blockSize
+	}
+
+	return nil
 }
 
 func connectAndParse(infoHash, myPeerId []byte, peerAddr string, parsedMessages chan<- peerMessage, outboundMsgs <-chan []byte, signalErrors chan<- error) {

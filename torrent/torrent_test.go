@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
-
-	"github.com/esmakov/bittorrent-client/parser"
 )
 
 // Creates random size files and makes the metainfo file from them,
@@ -45,19 +43,7 @@ func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
 	_, f := filepath.Split(testDir)
 	metaInfoFileName := f + ".torrent"
 
-	fileBytes, err := os.ReadFile(metaInfoFileName)
-	if err != nil {
-		return new(Torrent), err
-	}
-
-	p := parser.New(false)
-
-	topLevelMap, infoHash, err := p.ParseMetaInfoFile(fileBytes)
-	if err != nil {
-		return new(Torrent), err
-	}
-
-	torr, err := New(metaInfoFileName, topLevelMap, infoHash)
+	torr, err := New(metaInfoFileName, false)
 	if err != nil {
 		return new(Torrent), err
 	}
@@ -109,13 +95,11 @@ func TestSavePieceToDisk(t *testing.T) {
 	}
 
 	pieceNum := rand.Intn(torr.numPieces)
-	// pieceNum := 0
-
 	currPieceSize := torr.pieceSize
 	if pieceNum == torr.numPieces-1 {
 		currPieceSize = torr.totalSize - pieceNum*torr.pieceSize
 	}
-	p := NewPieceData(currPieceSize)
+	p := newPieceData(currPieceSize)
 	p.num = pieceNum
 
 	for i := 0; i < len(p.data); i++ {
@@ -163,12 +147,11 @@ func TestGetPieceFromDisk(t *testing.T) {
 	}
 
 	pieceNum := rand.Intn(torr.numPieces)
-
 	currPieceSize := torr.pieceSize
 	if pieceNum == torr.numPieces-1 {
 		currPieceSize = torr.totalSize - pieceNum*torr.pieceSize
 	}
-	p := NewPieceData(currPieceSize)
+	p := newPieceData(currPieceSize)
 	p.num = pieceNum
 	err = torr.getPieceFromDisk(p)
 	if err != nil {
@@ -207,12 +190,11 @@ func TestSplitIntoBlocks(t *testing.T) {
 	}
 
 	pieceNum := rand.Intn(torr.numPieces)
-
 	currPieceSize := torr.pieceSize
 	if pieceNum == torr.numPieces-1 {
 		currPieceSize = torr.totalSize - pieceNum*torr.pieceSize
 	}
-	p := NewPieceData(currPieceSize)
+	p := newPieceData(currPieceSize)
 	p.num = pieceNum
 	err = torr.getPieceFromDisk(p)
 	if err != nil {
@@ -241,3 +223,35 @@ func TestSplitIntoBlocks(t *testing.T) {
 }
 
 func TestNextAvailablePieceIdx(t *testing.T) {}
+
+func TestSendAndReceivePiece(t *testing.T) {
+	sender, err := createTorrentWithTestData(
+		3,
+		rand.Intn(32*1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = sender.OpenOrCreateFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pieceNum := rand.Intn(sender.numPieces)
+	c := make(chan []byte, 1)
+
+	receiver, err := New(sender.metaInfoFileName, false)
+	// go receiver.handleMessages([]byte(myPeerId), peer, signalErrors, signalDone)
+	reqMsg := createRequestMsg(p.num, blockOffset, BLOCK_SIZE)
+	c <- reqMsg
+
+	sender.retrieveAndSendPiece(pieceNum, BLOCK_SIZE, c)
+
+	if err := os.RemoveAll(sender.dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(sender.metaInfoFileName); err != nil {
+		t.Fatal(err)
+	}
+}
