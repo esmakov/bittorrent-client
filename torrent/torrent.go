@@ -3,6 +3,7 @@ package torrent
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -296,31 +297,58 @@ func (t *Torrent) Start() error {
 		// TODO: Keep intermittently checking for peers in a separate goroutine
 	}
 
-	signalErrors := make(chan error, MAX_PEERS)
-	signalDone := make(chan struct{}, MAX_PEERS)
+	errs := make(chan error, MAX_PEERS)
 
 	// TODO:
-	// Maintain N active peers
-	// One goroutine has to listen for incoming connections on the port we announced to tracker
 	// Another goroutine has to keep talking to the tracker
-	// Send peers have msg when a piece is downloaded
+	// Send peers a have msg when a piece is downloaded
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	numPeers := 0
 	for numPeers < MAX_PEERS {
 		// TODO: Choose more intelligently
 		peer := getRandPeer(peerList)
-		go t.handleMessages([]byte(myPeerId), peer, signalErrors, signalDone)
+		conn, err := net.DialTimeout("tcp", peer, 1*time.Second)
+		if err != nil {
+			return err
+		}
+
+		go t.handleConn(conn, []byte(myPeerId), peer, errs, ctx, cancel)
 		numPeers++
 	}
 
+	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprint("localhost:", portForTrackerResponse))
+	if err != nil {
+		return err
+	}
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+
 	for {
+		conn, err := l.AcceptTCP()
+		if err != nil {
+			return err
+		}
+
+		go t.handleConn(conn, []byte(myPeerId), conn.RemoteAddr().String(), errs, ctx, cancel)
+
 		select {
-		case e := <-signalErrors:
+		// NOTE: Make sure errors are only sent when goroutines exit
+		case e := <-errs:
 			log.Println("Error caught in start:", e)
 			peer := getRandPeer(peerList)
-			go t.handleMessages([]byte(myPeerId), peer, signalErrors, signalDone)
-		case <-signalDone:
+			conn, err := net.DialTimeout("tcp", peer, 1*time.Second)
+			if err != nil {
+				return err
+			}
+			go t.handleConn(conn, []byte(myPeerId), peer, errs, ctx, cancel)
+		case <-ctx.Done():
 			fmt.Println("Completed", t.metaInfoFileName)
+			// NOTE: Make sure this doesn't happen if the download started at 100% already
 			t.sendTrackerMessage(myPeerId, portForTrackerResponse, "completed")
 			return nil
 		}
@@ -687,12 +715,8 @@ func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
 	return blocks
 }
 
-func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors chan error, signalDone chan struct{}) {
-	parsedMessages := make(chan peerMessage, MAX_PEERS)
-	outboundMsgs := make(chan []byte, MAX_PEERS)
+func (t *Torrent) chooseResponse(myPeerId []byte, peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan peerMessage, errs chan<- error, cancel context.CancelFunc) {
 	defer close(outboundMsgs)
-
-	go connectAndParse(t.infoHash, myPeerId, peerAddr, parsedMessages, outboundMsgs, signalErrors)
 
 	connState := newConnState()
 
@@ -708,7 +732,12 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 
 	for {
 		select {
-		case msg := <-parsedMessages:
+		case msg, open := <-parsedMsgs:
+			if !open {
+				log.Println("handleConn signaled to drop connection to", peerAddr)
+				return
+			}
+
 			if msg.kind != fragment {
 				fmt.Printf("%v sent a %v\n", peerAddr, msg.kind)
 			}
@@ -717,6 +746,8 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 			case handshake:
 				// fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
 				outboundMsgs <- createBitfieldMsg(t.bitfield)
+
+				// TODO: Determine if we want to talk to this peer
 				outboundMsgs <- createUnchokeMsg()
 			case request:
 				err := t.retrieveAndSendPiece(msg.pieceNum, msg.blockSize, outboundMsgs)
@@ -746,7 +777,7 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 				var err error
 				p.num, err = randAvailablePieceIdx(t.numPieces, peerBitfield, t.bitfield)
 				if err != nil {
-					signalErrors <- err
+					errs <- err
 					return
 				}
 
@@ -773,19 +804,19 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 					fmt.Printf("Completed piece %v, checking...\n", p.num)
 					correct, err := t.checkPieceHash(p)
 					if err != nil {
-						signalErrors <- err
+						errs <- err
 						return
 					}
 
 					// TODO: Add peer to blacklist
 					if !correct {
 						err = fmt.Errorf("Piece %v from %v failed hash check", p.num, peerAddr)
-						signalErrors <- err
+						errs <- err
 						return
 					}
 
 					if err = t.savePieceToDisk(p); err != nil {
-						signalErrors <- err
+						errs <- err
 						return
 					}
 
@@ -794,7 +825,7 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 					fmt.Printf("%b\n", t.bitfield)
 
 					if t.IsComplete() {
-						signalDone <- struct{}{}
+						cancel()
 						// TODO: Anything else? Do peers have to be notified?
 						return
 					}
@@ -809,7 +840,7 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 
 					p.num, err = nextAvailablePieceIdx(p.num, t.numPieces, peerBitfield, t.bitfield)
 					if err != nil {
-						signalErrors <- err
+						errs <- err
 						return
 					}
 				}
@@ -824,7 +855,7 @@ func (t *Torrent) handleMessages(myPeerId []byte, peerAddr string, signalErrors 
 	}
 }
 
-func (t *Torrent) retrieveAndSendPiece(pieceNum int, blockSize int, outboundMsgs chan []byte) error {
+func (t *Torrent) retrieveAndSendPiece(pieceNum int, blockSize int, outboundMsgs chan<- []byte) error {
 	havePiece := bitfieldContains(t.bitfield, pieceNum)
 	if !havePiece {
 		outboundMsgs <- createChokeMsg()
@@ -849,45 +880,49 @@ func (t *Torrent) retrieveAndSendPiece(pieceNum int, blockSize int, outboundMsgs
 	return nil
 }
 
-func connectAndParse(infoHash, myPeerId []byte, peerAddr string, parsedMessages chan<- peerMessage, outboundMsgs <-chan []byte, signalErrors chan<- error) {
-	conn, err := net.DialTimeout("tcp", peerAddr, 1*time.Second)
-	if err != nil {
-		signalErrors <- err
-		return
-	}
+func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, peer string, errs chan<- error, ctx context.Context, cancel context.CancelFunc) {
 	defer conn.Close()
 
-	log.Println("Connected to peer", peerAddr)
+	parsedMessages := make(chan peerMessage)
+	defer close(parsedMessages)
+	outboundMsgs := make(chan []byte)
+	go t.chooseResponse(myPeerId, peer, outboundMsgs, parsedMessages, errs, cancel)
 
-	handshakeMsg := createHandshakeMsg(infoHash, myPeerId)
+	log.Println("Connected to peer", peer)
+
+	handshakeMsg := createHandshakeMsg(t.infoHash, myPeerId)
 	if _, err := conn.Write(handshakeMsg); err != nil {
-		signalErrors <- err
+		errs <- err
 		return
 	}
 
 	msgBuf := make([]byte, 32*1024)
 	msgBufEndIdx := 0
 
-	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13 // Include piece message header
+	// Include piece message header
+	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13
 	tempBuf := make([]byte, MAX_RESPONSE_SIZE)
 
-	waitDuration := 2 * time.Second
-	t := time.NewTimer(waitDuration)
+	// Generally 2 minutes: https://wiki.theory.org/BitTorrentSpecification#keep-alive:_.3Clen.3D0000.3E
+	timeout := 2 * time.Second
+	timer := time.NewTimer(timeout)
 
 	for {
 		select {
 		case msg, open := <-outboundMsgs:
 			if !open {
-				log.Println("Handler signaled to drop connection to", peerAddr)
+				log.Println("chooseResponse signaled to drop connection to", peer)
 				return
 			}
 
 			if _, err := conn.Write(msg); err != nil {
-				signalErrors <- err
+				errs <- err
 				return
 			}
-		case <-t.C:
-			signalErrors <- errors.New("Waited too long")
+		case <-timer.C:
+			errs <- errors.New("Waited too long")
+			return
+		case <-ctx.Done():
 			return
 		default:
 			// fmt.Println("Nothing to write")
@@ -899,15 +934,16 @@ func connectAndParse(infoHash, myPeerId []byte, peerAddr string, parsedMessages 
 			// fmt.Println("Nothing to read")
 			continue
 		} else if err != nil {
-			signalErrors <- err
+			errs <- err
 			return
 		}
 
-		if !t.Stop() {
-			<-t.C
+		if !timer.Stop() {
+			<-timer.C
 		}
-		t.Reset(waitDuration)
+		timer.Reset(timeout)
 
+		// TODO: Use len instead
 		if slices.Max(msgBuf) == 0 {
 			// fmt.Println("Didn't already contain fragment(s)")
 			copy(msgBuf, tempBuf)
@@ -921,9 +957,9 @@ func connectAndParse(infoHash, myPeerId []byte, peerAddr string, parsedMessages 
 
 		// Passing a slice of msgBuf to the parser would create msg structs that get cleared too
 		copyToParse := slices.Clone(msgBuf[:msgBufEndIdx])
-		msgList, err := parseMultiMessage(copyToParse, infoHash)
+		msgList, err := parseMultiMessage(copyToParse, t.infoHash)
 		if err != nil {
-			signalErrors <- err
+			errs <- err
 			return
 		}
 

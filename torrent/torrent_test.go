@@ -1,6 +1,7 @@
 package torrent
 
 import (
+	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -224,34 +225,53 @@ func TestSplitIntoBlocks(t *testing.T) {
 
 func TestNextAvailablePieceIdx(t *testing.T) {}
 
-func TestSendAndReceivePiece(t *testing.T) {
-	sender, err := createTorrentWithTestData(
-		3,
-		rand.Intn(32*1024))
-	if err != nil {
-		t.Fatal(err)
-	}
+// func TestSendAndReceive(t *testing.T) {
+// 	sender, err := createTorrentWithTestData(
+// 		3,
+// 		rand.Intn(32*1024))
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	_, err = sender.OpenOrCreateFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
+// 	_, err = sender.OpenOrCreateFiles()
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	pieceNum := rand.Intn(sender.numPieces)
-	c := make(chan []byte, 1)
+// 	// pieceNum := rand.Intn(sender.numPieces)
 
-	receiver, err := New(sender.metaInfoFileName, false)
-	// go receiver.handleMessages([]byte(myPeerId), peer, signalErrors, signalDone)
-	reqMsg := createRequestMsg(p.num, blockOffset, BLOCK_SIZE)
-	c <- reqMsg
+// 	receiver, err := New(sender.metaInfoFileName, false)
+// 	// Has to be in different directory from sender so it won't think it has the files already
+// 	receiver.dir = "torrent_test_receive"
+// 	receiver.OpenOrCreateFiles()
 
-	sender.retrieveAndSendPiece(pieceNum, BLOCK_SIZE, c)
+// 	// sender.Listen()
+// 	signalErrors := make(chan error, 1)
+// 	signalDone := make(chan struct{}, 1)
+// 	receiverIP := "127.0.0.1:420"
+// 	senderIP := "127.0.0.1:421"
+// 	go sender.chooseResponse([]byte{0x01}, receiverIP, signalErrors, signalDone)
+// 	go receiver.chooseResponse([]byte{0x02}, senderIP, signalErrors, signalDone)
 
-	if err := os.RemoveAll(sender.dir); err != nil {
-		t.Fatal(err)
-	}
+// 	for {
+// 		select {
+// 		case e := <-signalErrors:
+// 			t.Fatal("Error caught in start:", e)
+// 		case <-signalDone:
+// 			fmt.Println("Completed", sender.metaInfoFileName)
+// 			break
+// 		}
+// 	}
 
-	if err := os.Remove(sender.metaInfoFileName); err != nil {
-		t.Fatal(err)
-	}
-}
+// 	if err := os.RemoveAll(receiver.dir); err != nil {
+// 		t.Fatal(err)
+// 	}
+
+// 	if err := os.RemoveAll(sender.dir); err != nil {
+// 		t.Fatal(err)
+// 	}
+
+// 	if err := os.Remove(sender.metaInfoFileName); err != nil {
+// 		t.Fatal(err)
+// 	}
+// }
