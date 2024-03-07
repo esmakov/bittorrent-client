@@ -24,7 +24,7 @@ func main() {
 	}
 	metaInfoFileName := os.Args[2]
 	if filepath.Ext(metaInfoFileName) != ".torrent" {
-		fmt.Println("File is not of type .torrent")
+		fmt.Printf("%v is not of type .torrent\n", metaInfoFileName)
 		return
 	}
 
@@ -46,7 +46,7 @@ func main() {
 			return
 		}
 
-		t, err := openAndCreateTorrent(metaInfoFileName, false)
+		t, err := openAndCheckTorrent(metaInfoFileName, false)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -61,7 +61,7 @@ func main() {
 		fmt.Println(t)
 
 		if err := t.Start(); err != nil {
-			fmt.Println(err)
+			fmt.Printf("Torrent %v failed in Start: %v\n", metaInfoFileName, err)
 			return
 		}
 	default:
@@ -71,7 +71,7 @@ func main() {
 	return
 }
 
-func openAndCreateTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torrent, error) {
+func openAndCheckTorrent(metaInfoFileName string, shouldPrettyPrint bool) (*torrent.Torrent, error) {
 	t, err := torrent.New(metaInfoFileName, shouldPrettyPrint)
 	if err != nil {
 		return nil, err

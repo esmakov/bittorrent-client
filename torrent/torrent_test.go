@@ -1,7 +1,6 @@
 package torrent
 
 import (
-	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"

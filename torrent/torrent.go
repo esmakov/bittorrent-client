@@ -47,6 +47,7 @@ type Torrent struct {
 	lastChecked      time.Time
 	dir              string
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
+	// numInterested // for connection limit
 	sync.Mutex
 }
 
@@ -219,36 +220,37 @@ func (t *Torrent) String() string {
 	return sb.String()
 }
 
+// Registers file descriptors with our Torrent and returns files that have to be checked
 func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
 	var filesToCheck []*torrentFile
 	if t.dir != "" {
 		os.Mkdir(t.dir, 0o766)
 	}
-	for _, tf := range t.files {
+	for _, file := range t.files {
 		if t.dir != "" {
-			tf.path = filepath.Join(t.dir, tf.path)
+			file.path = filepath.Join(t.dir, file.path)
 		}
 
-		fd, err := os.OpenFile(tf.path, os.O_RDWR, 0)
+		fd, err := os.OpenFile(file.path, os.O_RDWR, 0)
 		if errors.Is(err, fs.ErrNotExist) {
-			fd, err = os.Create(tf.path)
+			fd, err = os.Create(file.path)
 			if err != nil {
 				return nil, err
 			}
-			tf.fd = fd
+			file.fd = fd
 		} else if err != nil {
 			return nil, err
 		} else {
-			tf.fd = fd
-			fi, err := os.Stat(tf.fd.Name())
+			file.fd = fd
+			info, err := os.Stat(file.fd.Name())
 			if err != nil {
 				return nil, err
 			}
 
 			// TODO: Since a new torrent instance is created each run,
 			// this doesn't have the intended effect.
-			if fi.ModTime().After(t.lastChecked) {
-				filesToCheck = append(filesToCheck, tf)
+			if info.ModTime().After(t.lastChecked) {
+				filesToCheck = append(filesToCheck, file)
 			}
 		}
 	}
@@ -256,7 +258,7 @@ func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
 	return filesToCheck, nil
 }
 
-const MAX_PEERS = 1
+const MAX_PEER_CONNS = 1
 
 func (t *Torrent) Start() error {
 	myPeerId := getPeerId()
@@ -294,27 +296,27 @@ func (t *Torrent) Start() error {
 	}
 
 	if len(peerList) == 0 {
-		// TODO: Keep intermittently checking for peers in a separate goroutine
+		// TODO: Keep polling tracker for peers in a separate goroutine
 	}
 
-	errs := make(chan error, MAX_PEERS)
+	errs := make(chan error, MAX_PEER_CONNS)
 
-	// TODO:
-	// Another goroutine has to keep talking to the tracker
-	// Send peers a have msg when a piece is downloaded
+	// TODO: Send peers a have msg when a piece is downloaded
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	numPeers := 0
-	for numPeers < MAX_PEERS {
+	for numPeers < MAX_PEER_CONNS {
 		// TODO: Choose more intelligently
 		peer := getRandPeer(peerList)
 		conn, err := net.DialTimeout("tcp", peer, 1*time.Second)
 		if err != nil {
-			return err
+			log.Println(err)
+			continue
 		}
 
-		go t.handleConn(conn, []byte(myPeerId), peer, errs, ctx, cancel)
+		go t.handleConn(conn, []byte(myPeerId), errs, ctx, cancel)
 		numPeers++
 	}
 
@@ -322,6 +324,7 @@ func (t *Torrent) Start() error {
 	if err != nil {
 		return err
 	}
+
 	l, err := net.ListenTCP("tcp", addr)
 	if err != nil {
 		return err
@@ -329,28 +332,36 @@ func (t *Torrent) Start() error {
 	defer l.Close()
 
 	for {
-		conn, err := l.AcceptTCP()
-		if err != nil {
-			return err
+		if numPeers < MAX_PEER_CONNS {
+			conn, err := l.AcceptTCP()
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+			log.Printf("Incoming connection from %v\n", conn.RemoteAddr())
+			go t.handleConn(conn, []byte(myPeerId), errs, ctx, cancel)
+			numPeers++
 		}
-
-		go t.handleConn(conn, []byte(myPeerId), conn.RemoteAddr().String(), errs, ctx, cancel)
 
 		select {
 		// NOTE: Make sure errors are only sent when goroutines exit
+		// so we don't go over MAX_PEER_CONNS
 		case e := <-errs:
-			log.Println("Error caught in start:", e)
+			log.Println("Connection dropped, finding more:", e)
+
 			peer := getRandPeer(peerList)
 			conn, err := net.DialTimeout("tcp", peer, 1*time.Second)
 			if err != nil {
-				return err
+				log.Println(err)
+				continue
 			}
-			go t.handleConn(conn, []byte(myPeerId), peer, errs, ctx, cancel)
+			go t.handleConn(conn, []byte(myPeerId), errs, ctx, cancel)
 		case <-ctx.Done():
-			fmt.Println("Completed", t.metaInfoFileName)
+			fmt.Println("COMPLETED", t.metaInfoFileName)
 			// NOTE: Make sure this doesn't happen if the download started at 100% already
 			t.sendTrackerMessage(myPeerId, portForTrackerResponse, "completed")
 			return nil
+		default:
 		}
 	}
 }
@@ -419,6 +430,7 @@ func (t *Torrent) checkPieceHash(p *pieceData) (bool, error) {
 
 var PieceNotDownloadedErr error = errors.New("Piece not downloaded yet")
 
+// TODO: Do in parallel?
 func (t *Torrent) CheckAllPieces(files []*torrentFile) ([]int, error) {
 	p := newPieceData(t.pieceSize)
 	var existingPieces []int
@@ -440,15 +452,14 @@ func (t *Torrent) CheckAllPieces(files []*torrentFile) ([]int, error) {
 		}
 
 		if !correct {
-			// TODO: Can be removed since PieceNotDownloadedErr now signals this
 			if !empty {
 				return existingPieces, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
 			}
-			// Hasn't been downloaded yet
+			// Piece hasn't been downloaded but some pieces ahead have
 			continue
 		}
 
-		// Could be empty and still correct at this point, if intentionally so
+		// NOTE: Piece could be empty and still correct at this point, if intentionally so
 		updateBitfield(t.bitfield, p.num)
 		t.piecesDownloaded++
 		existingPieces = append(existingPieces, p.num)
@@ -469,7 +480,15 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
 	if len(t.files) == 1 {
-		_, err := t.files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
+		fileInfo, err := os.Stat(t.files[0].path)
+		if err != nil {
+			return err
+		}
+
+		if pieceStartIdx >= fileInfo.Size() {
+			return PieceNotDownloadedErr
+		}
+		_, err = t.files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
 		return err
 	}
 
@@ -506,6 +525,9 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 				// pieceStartIdx >= fileStartIdx + currFile.finalSize
 				// pieceStartIdx >= fileEndIdx
 				// ^ handled above, why reach here?
+				if pieceStartIdx == fileEndIdx {
+					panic("very specific condition")
+				}
 				if pieceOffsetIntoFile >= currFile.finalSize {
 					break
 				}
@@ -715,7 +737,7 @@ func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
 	return blocks
 }
 
-func (t *Torrent) chooseResponse(myPeerId []byte, peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan peerMessage, errs chan<- error, cancel context.CancelFunc) {
+func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan peerMessage, errs chan<- error, cancel context.CancelFunc) {
 	defer close(outboundMsgs)
 
 	connState := newConnState()
@@ -731,6 +753,7 @@ func (t *Torrent) chooseResponse(myPeerId []byte, peerAddr string, outboundMsgs 
 	p := newPieceData(t.pieceSize)
 
 	for {
+		// fmt.Println("Trying to receieve parsed")
 		select {
 		case msg, open := <-parsedMsgs:
 			if !open {
@@ -880,13 +903,15 @@ func (t *Torrent) retrieveAndSendPiece(pieceNum int, blockSize int, outboundMsgs
 	return nil
 }
 
-func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, peer string, errs chan<- error, ctx context.Context, cancel context.CancelFunc) {
+func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, errs chan<- error, ctx context.Context, cancel context.CancelFunc) {
 	defer conn.Close()
 
-	parsedMessages := make(chan peerMessage)
+	parsedMessages := make(chan peerMessage, 10)
 	defer close(parsedMessages)
-	outboundMsgs := make(chan []byte)
-	go t.chooseResponse(myPeerId, peer, outboundMsgs, parsedMessages, errs, cancel)
+	outboundMsgs := make(chan []byte, 10)
+
+	peer := conn.RemoteAddr().String()
+	go t.chooseResponse(peer, outboundMsgs, parsedMessages, errs, cancel)
 
 	log.Println("Connected to peer", peer)
 
@@ -897,7 +922,7 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, peer string, errs c
 	}
 
 	msgBuf := make([]byte, 32*1024)
-	msgBufEndIdx := 0
+	msgBufCursor := 0
 
 	// Include piece message header
 	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13
@@ -949,14 +974,14 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, peer string, errs c
 			copy(msgBuf, tempBuf)
 		} else {
 			// fmt.Println("Appending to earlier fragment")
-			newSection := msgBuf[msgBufEndIdx : msgBufEndIdx+numRead]
+			newSection := msgBuf[msgBufCursor : msgBufCursor+numRead]
 			copy(newSection, tempBuf)
 		}
 
-		msgBufEndIdx += numRead
+		msgBufCursor += numRead
 
 		// Passing a slice of msgBuf to the parser would create msg structs that get cleared too
-		copyToParse := slices.Clone(msgBuf[:msgBufEndIdx])
+		copyToParse := slices.Clone(msgBuf[:msgBufCursor])
 		msgList, err := parseMultiMessage(copyToParse, t.infoHash)
 		if err != nil {
 			errs <- err
@@ -966,6 +991,7 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, peer string, errs c
 		firstFragmentIdx := 0
 		for _, msg := range msgList {
 			parsedMessages <- msg
+			// fmt.Println("Parsed a", msg.kind)
 
 			if msg.kind != fragment {
 				firstFragmentIdx += msg.totalSize
@@ -974,13 +1000,13 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, peer string, errs c
 
 		clear(msgBuf[:firstFragmentIdx])
 
-		if firstFragmentIdx == msgBufEndIdx {
+		if firstFragmentIdx == msgBufCursor {
 			// No fragments found
-			msgBufEndIdx = 0
+			msgBufCursor = 0
 		} else if firstFragmentIdx != 0 {
 			// Copy over leading 0s
 			copy(msgBuf, msgBuf[firstFragmentIdx:])
-			msgBufEndIdx -= firstFragmentIdx
+			msgBufCursor -= firstFragmentIdx
 		}
 	}
 }
