@@ -312,7 +312,7 @@ func (t *Torrent) Start() error {
 		peer := getRandPeer(peerList)
 		conn, err := net.DialTimeout("tcp", peer, 1*time.Second)
 		if err != nil {
-			log.Println(err)
+			log.Println("Dial:", err)
 			continue
 		}
 
@@ -335,7 +335,7 @@ func (t *Torrent) Start() error {
 		if numPeers < MAX_PEER_CONNS {
 			conn, err := l.AcceptTCP()
 			if err != nil {
-				log.Println(err)
+				log.Println("Accept:", err)
 				continue
 			}
 			log.Printf("Incoming connection from %v\n", conn.RemoteAddr())
@@ -347,15 +347,17 @@ func (t *Torrent) Start() error {
 		// NOTE: Make sure errors are only sent when goroutines exit
 		// so we don't go over MAX_PEER_CONNS
 		case e := <-errs:
-			log.Println("Connection dropped, finding more:", e)
+			numPeers--
+			log.Println("Conn dropped:", e)
 
 			peer := getRandPeer(peerList)
 			conn, err := net.DialTimeout("tcp", peer, 1*time.Second)
 			if err != nil {
-				log.Println(err)
+				log.Println("Dial:", err)
 				continue
 			}
 			go t.handleConn(conn, []byte(myPeerId), errs, ctx, cancel)
+			numPeers++
 		case <-ctx.Done():
 			fmt.Println("COMPLETED", t.metaInfoFileName)
 			// NOTE: Make sure this doesn't happen if the download started at 100% already
@@ -525,10 +527,9 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 				// pieceStartIdx >= fileStartIdx + currFile.finalSize
 				// pieceStartIdx >= fileEndIdx
 				// ^ handled above, why reach here?
-				if pieceStartIdx == fileEndIdx {
-					panic("very specific condition")
-				}
+				// maybe pieceStartIdx == fileEndIdx
 				if pieceOffsetIntoFile >= currFile.finalSize {
+					panic("very specific condition")
 					break
 				}
 			}
@@ -753,127 +754,126 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 	p := newPieceData(t.pieceSize)
 
 	for {
-		// fmt.Println("Trying to receieve parsed")
-		select {
-		case msg, open := <-parsedMsgs:
-			if !open {
-				log.Println("handleConn signaled to drop connection to", peerAddr)
+		msg, open := <-parsedMsgs
+		if !open {
+			// log.Println("handleConn signaled to drop connection to", peerAddr)
+			return
+		}
+
+		if msg.kind != fragment {
+			fmt.Printf("%v sent a %v\n", peerAddr, msg.kind)
+		}
+
+		switch msg.kind {
+		case handshake:
+			// fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
+			outboundMsgs <- createBitfieldMsg(t.bitfield)
+			fmt.Printf("Sending bitfield to %v\n", peerAddr)
+
+			// TODO: Determine if we want to talk to this peer
+			outboundMsgs <- createUnchokeMsg()
+		case request:
+			err := t.retrieveAndSendPiece(msg.pieceNum, msg.blockSize, outboundMsgs)
+			if err != nil {
+				// Drop connection?
+				log.Println("Retrieving piece:", err)
+				continue
+			}
+		case keepalive:
+		case choke:
+			connState.peer_choking = true
+		case unchoke:
+			connState.peer_choking = false
+		case interested:
+			connState.peer_interested = true
+		case uninterested:
+			connState.peer_interested = false
+		case bitfield:
+			// if connState.peer_choking {
+			// 	continue
+			// }
+			peerBitfield = msg.bitfield
+
+			outboundMsgs <- createInterestedMsg()
+			fmt.Printf("Sending interested, request to %v\n", peerAddr)
+
+			// Start wherever for now
+			var err error
+			p.num, err = nextAvailablePieceIdx(rand.Intn(t.numPieces), t.numPieces, peerBitfield, t.bitfield)
+			if err != nil {
+				errs <- err
 				return
 			}
 
-			if msg.kind != fragment {
-				fmt.Printf("%v sent a %v\n", peerAddr, msg.kind)
+			reqMsg := createRequestMsg(p.num, blockOffset, BLOCK_SIZE)
+			outboundMsgs <- reqMsg
+			fmt.Printf("Requesting piece %v from %v\n", p.num, peerAddr)
+		case piece:
+			p.storeBlockIntoPiece(msg, currBlockSize)
+
+			if p.num == t.numPieces-1 {
+				currPieceSize = t.totalSize - p.num*t.pieceSize
+				numBlocks = int(math.Ceil(float64(currPieceSize) / BLOCK_SIZE))
+				lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
 			}
 
-			switch msg.kind {
-			case handshake:
-				// fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
-				outboundMsgs <- createBitfieldMsg(t.bitfield)
-
-				// TODO: Determine if we want to talk to this peer
-				outboundMsgs <- createUnchokeMsg()
-			case request:
-				err := t.retrieveAndSendPiece(msg.pieceNum, msg.blockSize, outboundMsgs)
-				if err != nil {
-					// Drop connection?
-					continue
+			if blockOffset < lastBlockOffset { // Incomplete piece
+				blockOffset += BLOCK_SIZE // Account for block just downloaded
+				remaining := currPieceSize - blockOffset
+				if remaining < BLOCK_SIZE {
+					currBlockSize = remaining
 				}
-			case keepalive:
-			case choke:
-				connState.peer_choking = true
-			case unchoke:
-				connState.peer_choking = false
-			case interested:
-				connState.peer_interested = true
-			case uninterested:
-				connState.peer_interested = false
-			case bitfield:
-				// if connState.peer_choking {
-				// 	continue
-				// }
-				peerBitfield = msg.bitfield
-
-				outboundMsgs <- createInterestedMsg()
-				fmt.Printf("Sending unchoke, interested, bitfield to %v\n", peerAddr)
-
-				// Start wherever for now
-				var err error
-				p.num, err = randAvailablePieceIdx(t.numPieces, peerBitfield, t.bitfield)
+				fmt.Println(blockOffset, "/", currPieceSize, "bytes")
+			} else {
+				fmt.Printf("Completed piece %v, checking...\n", p.num)
+				correct, err := t.checkPieceHash(p)
 				if err != nil {
 					errs <- err
 					return
 				}
 
-				reqMsg := createRequestMsg(p.num, blockOffset, BLOCK_SIZE)
-				outboundMsgs <- reqMsg
-				fmt.Printf("Requesting piece %v from %v\n", p.num, peerAddr)
-			case piece:
-				p.storeBlockIntoPiece(msg, currBlockSize)
-
-				if p.num == t.numPieces-1 {
-					currPieceSize = t.totalSize - p.num*t.pieceSize
-					numBlocks = int(math.Ceil(float64(currPieceSize) / BLOCK_SIZE))
-					lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
+				// TODO: Add peer to blacklist
+				if !correct {
+					err = fmt.Errorf("Piece %v from %v failed hash check", p.num, peerAddr)
+					errs <- err
+					return
 				}
 
-				if blockOffset < lastBlockOffset { // Incomplete piece
-					blockOffset += BLOCK_SIZE // Account for block just downloaded
-					remaining := currPieceSize - blockOffset
-					if remaining < BLOCK_SIZE {
-						currBlockSize = remaining
-					}
-					fmt.Println(blockOffset, "/", currPieceSize, "bytes")
-				} else {
-					fmt.Printf("Completed piece %v, checking...\n", p.num)
-					correct, err := t.checkPieceHash(p)
-					if err != nil {
-						errs <- err
-						return
-					}
-
-					// TODO: Add peer to blacklist
-					if !correct {
-						err = fmt.Errorf("Piece %v from %v failed hash check", p.num, peerAddr)
-						errs <- err
-						return
-					}
-
-					if err = t.savePieceToDisk(p); err != nil {
-						errs <- err
-						return
-					}
-
-					t.storeDownloaded(t.piecesDownloaded + 1)
-					updateBitfield(t.bitfield, msg.pieceNum)
-					fmt.Printf("%b\n", t.bitfield)
-
-					if t.IsComplete() {
-						cancel()
-						// TODO: Anything else? Do peers have to be notified?
-						return
-					}
-
-					// Reset
-					currPieceSize = t.pieceSize
-					currBlockSize = BLOCK_SIZE
-					numBlocks = t.pieceSize / BLOCK_SIZE
-					blockOffset = 0
-					lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
-					clear(p.data) // In case we pause in the middle of a piece
-
-					p.num, err = nextAvailablePieceIdx(p.num, t.numPieces, peerBitfield, t.bitfield)
-					if err != nil {
-						errs <- err
-						return
-					}
+				if err = t.savePieceToDisk(p); err != nil {
+					errs <- err
+					return
 				}
 
-				reqMsg := createRequestMsg(p.num, blockOffset, currBlockSize)
-				outboundMsgs <- reqMsg
-				fmt.Printf("Requesting %v bytes for piece %v from %v\n", currBlockSize, p.num, peerAddr)
-			case have:
-				updateBitfield(peerBitfield, msg.pieceNum)
+				t.storeDownloaded(t.piecesDownloaded + 1)
+				updateBitfield(t.bitfield, msg.pieceNum)
+				fmt.Printf("%b\n", t.bitfield)
+
+				if t.IsComplete() {
+					cancel()
+					// TODO: Anything else? Do peers have to be notified?
+					return
+				}
+
+				// Reset
+				currPieceSize = t.pieceSize
+				currBlockSize = BLOCK_SIZE
+				numBlocks = t.pieceSize / BLOCK_SIZE
+				blockOffset = 0
+				lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
+				clear(p.data) // In case we pause in the middle of a piece
+
+				p.num, err = nextAvailablePieceIdx(p.num, t.numPieces, peerBitfield, t.bitfield)
+				if err != nil {
+					errs <- err
+					return
+				}
 			}
+
+			reqMsg := createRequestMsg(p.num, blockOffset, currBlockSize)
+			outboundMsgs <- reqMsg
+			fmt.Printf("Requesting %v bytes for piece %v from %v\n", currBlockSize, p.num, peerAddr)
+		case have:
+			updateBitfield(peerBitfield, msg.pieceNum)
 		}
 	}
 }
@@ -936,7 +936,7 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, errs chan<- error, 
 		select {
 		case msg, open := <-outboundMsgs:
 			if !open {
-				log.Println("chooseResponse signaled to drop connection to", peer)
+				// log.Println("chooseResponse signaled to drop connection to", peer)
 				return
 			}
 
@@ -1062,48 +1062,20 @@ func bitfieldContains(bitfield []byte, pieceNum int) bool {
 	return false
 }
 
-func randAvailablePieceIdx(numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
-	attempts := 0
-	for attempts < numPieces {
-		randByteIdx := rand.Intn(len(peerBitfield))
-		b := peerBitfield[randByteIdx]
-		for bitsFromRight := 7; bitsFromRight >= 0; bitsFromRight-- {
-			mask := byte(1 << bitsFromRight)
-			if b&mask != 0 && ourBitfield[randByteIdx]&mask == 0 {
-				return randByteIdx*8 + (7 - bitsFromRight), nil
-			}
-			attempts++
-		}
-	}
-	return 0, errors.New("Peer has no pieces we want")
-}
-
+// Sequentially chooses the number of a piece we want
 func nextAvailablePieceIdx(currPieceNum, numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
 	nextPieceNum := currPieceNum + 1
-	byteToCheckIdx := nextPieceNum / 8
 
-	if nextPieceNum == numPieces {
-		byteToCheckIdx = 0
-		nextPieceNum = 0
-	}
-
-	b := peerBitfield[byteToCheckIdx]
-
-	attempts := 0
-	for attempts < numPieces {
-		for bitsFromRight := 7 - nextPieceNum%8; bitsFromRight >= 0; bitsFromRight-- {
-			mask := byte(1 << bitsFromRight)
-			if b&mask != 0 && ourBitfield[byteToCheckIdx]&mask == 0 {
-				return byteToCheckIdx*8 + (7 - bitsFromRight), nil
-			}
-			attempts++
+	for attempts := 0; attempts < numPieces; attempts++ {
+		if currPieceNum == numPieces {
+			nextPieceNum = 0
 		}
 
-		byteToCheckIdx++
-		if byteToCheckIdx == len(peerBitfield) {
-			byteToCheckIdx = 0
+		if bitfieldContains(peerBitfield, nextPieceNum) &&
+			!bitfieldContains(ourBitfield, nextPieceNum) {
+			return nextPieceNum, nil
 		}
-		b = peerBitfield[byteToCheckIdx]
+		nextPieceNum++
 	}
 
 	return 0, errors.New("Peer has no pieces we want")

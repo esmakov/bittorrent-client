@@ -222,7 +222,144 @@ func TestSplitIntoBlocks(t *testing.T) {
 	}
 }
 
-func TestNextAvailablePieceIdx(t *testing.T) {}
+func TestNextAvailablePieceIdx(t *testing.T) {
+	torr, err := createTorrentWithTestData(
+		3,
+		rand.Intn(32*1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// We should want all the pieces now
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Fatal(err)
+	}
+
+	pieceNum := rand.Intn(torr.numPieces)
+	p := newPieceData(torr.numPieces)
+	p.num = pieceNum
+
+	var expectedNum int
+	if p.num == torr.numPieces {
+		expectedNum = 0
+	} else {
+		expectedNum = p.num + 1
+	}
+
+	peerBitfield := make([]byte, len(torr.bitfield))
+	for i := range len(peerBitfield) {
+		peerBitfield[i] |= 0xFF
+		torr.bitfield[i] &= 0x00
+	}
+
+	num, err := nextAvailablePieceIdx(p.num, torr.numPieces, peerBitfield, torr.bitfield)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Fatal(err)
+	}
+
+	if num != expectedNum {
+		t.Fatalf("Expected %v, got %v\n", expectedNum, num)
+	}
+}
+
+func BenchmarkNextAvailablePieceIdx(t *testing.B) {
+	torr, err := createTorrentWithTestData(
+		3,
+		32*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// We should want all the pieces now
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Fatal(err)
+	}
+
+	pieceNum := rand.Intn(torr.numPieces)
+	p := newPieceData(torr.numPieces)
+	p.num = pieceNum
+
+	var expectedNum int
+	if p.num == torr.numPieces {
+		expectedNum = 0
+	} else {
+		expectedNum = p.num + 1
+	}
+
+	peerBitfield := make([]byte, len(torr.bitfield))
+	for i := range len(peerBitfield) {
+		peerBitfield[i] |= 0xFF
+		torr.bitfield[i] &= 0x00
+	}
+
+	for i := 0; i < t.N; i++ {
+		n1, err1 := nextAvailablePieceIdx(p.num, torr.numPieces, peerBitfield, torr.bitfield)
+		if err1 != nil {
+			t.Fatal(err1)
+		}
+		if n1 != expectedNum {
+			t.Fatalf("Expected %v, got %v\n", expectedNum, n1)
+		}
+		// n2, err2 := nextAvailablePieceIdx2(p.num, torr.numPieces, peerBitfield, torr.bitfield)
+		// if err2 != nil {
+		// 	t.Fatal(err2)
+		// }
+		// if n2 != expectedNum {
+		// 	t.Fatalf("Expected %v, got %v\n", expectedNum, n2)
+		// }
+	}
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func BenchmarkNextAvailablePieceIdx2(t *testing.B) {
+	torr, err := createTorrentWithTestData(
+		3,
+		32*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// We should want all the pieces now
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Fatal(err)
+	}
+
+	pieceNum := rand.Intn(torr.numPieces)
+	p := newPieceData(torr.numPieces)
+	p.num = pieceNum
+
+	var expectedNum int
+	if p.num == torr.numPieces {
+		expectedNum = 0
+	} else {
+		expectedNum = p.num + 1
+	}
+
+	peerBitfield := make([]byte, len(torr.bitfield))
+	for i := range len(peerBitfield) {
+		peerBitfield[i] |= 0xFF
+		torr.bitfield[i] &= 0x00
+	}
+
+	for i := 0; i < t.N; i++ {
+		n2, err2 := nextAvailablePieceIdx2(p.num, torr.numPieces, peerBitfield, torr.bitfield)
+		if err2 != nil {
+			t.Fatal(err2)
+		}
+		if n2 != expectedNum {
+			t.Fatalf("Expected %v, got %v\n", expectedNum, n2)
+		}
+	}
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // func TestSendAndReceive(t *testing.T) {
 // 	sender, err := createTorrentWithTestData(
