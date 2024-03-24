@@ -4,7 +4,7 @@ Made purely as a learning project, USE AT YOUR OWN RISK.
 The [mktorrent](github.com/pobrn/mktorrent/) package is required to build test code.
 
 # Usage
-```go
+```shell
 go run main <command> <path/to/file.torrent>
 ```
 
@@ -26,14 +26,19 @@ Where:
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
-### Completeness
+- Selecting files to download
+- Specify destination directory
+- Specify log level and log destination
+- Sanitize torrent file against terminal control characters for printing
+- Run in background
 - More subcommands: remove, pause/resume
-- Support the dictionary model for tracker responses listing available peers
 
 ### Optimizations
 - Better piece download strategies (rarest first)
 - Better peer selection strategies (optimistic unchoking)
 
-### Not currently supported
+### Protocol
+- Support the dictionary model for tracker responses listing available peers
+#### Extensions
 - DHT
 - Peer Exchange

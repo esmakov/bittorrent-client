@@ -120,7 +120,7 @@ func (p *parser) ParseResponse(r io.Reader) (map[string]any, error) {
 // While scanning, builds up the token list and populates indices around "info" dictionary
 func (p *parser) bDecode(r io.Reader) error {
 	scan := bufio.NewScanner(r)
-	// TODO: Use smaller buffer
+	// TODO: Use smaller buffer?
 	const START_BUFFER_SIZE = 512 * 1024
 	const MAX_BUFFER_SIZE = 1024 * 1024
 
@@ -372,8 +372,8 @@ func (p *parser) splitFunc(data []byte, atEOF bool) (bytesToAdvance int, token [
 		}
 	}
 
+	// Signal to scanner to try again and process more input
 	if !atEOF {
-		// Signal to scanner to try again and process more input
 		return 0, nil, nil
 	}
 

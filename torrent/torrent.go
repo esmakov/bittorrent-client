@@ -1,7 +1,6 @@
 package torrent
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -30,7 +29,6 @@ import (
 type Torrent struct {
 	metaInfoFileName string
 	trackerHostname  string
-	trackerId        string
 	comment          string
 	infoHash         []byte
 	isPrivate        bool
@@ -38,14 +36,16 @@ type Torrent struct {
 	pieceSize        int
 	numPieces        int
 	totalSize        int
-	seeders          int
-	leechers         int
 	piecesDownloaded int
 	piecesUploaded   int
 	bitfield         []byte
 	files            []*torrentFile
 	lastChecked      time.Time
 	dir              string
+	// Optionally sent by server
+	trackerId string
+	seeders   int
+	leechers  int
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 	// numInterested // for connection limit
 	sync.Mutex
@@ -55,7 +55,7 @@ type torrentFile struct {
 	fd        *os.File
 	path      string
 	finalSize int64
-	// TODO: wanted bool
+	wanted    bool
 }
 
 func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
@@ -72,7 +72,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	}
 
 	// Fields common to single-file and multi-file torrents
-	announce := ""
+	var announce string
 	if bAnnounce, ok := metaInfoMap["announce"]; ok {
 		announce = bAnnounce.(string)
 	}
@@ -86,12 +86,15 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	bitfield := make([]byte, bitfieldLen)
 
 	// Optional common fields
-	comment := ""
+	var (
+		comment   string
+		isPrivate int
+	)
+
 	if bComment, ok := metaInfoMap["comment"]; ok {
 		comment = bComment.(string)
 	}
 
-	isPrivate := 0
 	if bPrivate, ok := bInfo["private"]; ok {
 		isPrivate = bPrivate.(int)
 	}
@@ -102,10 +105,11 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		hasMultipleFiles = true
 	}
 
-	totalSize := 0
-
-	var files []*torrentFile
-	var dir string
+	var (
+		totalSize int
+		files     []*torrentFile
+		dir       string
+	)
 
 	if hasMultipleFiles {
 		dir = bInfo["name"].(string)
@@ -123,9 +127,14 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 				pathSegments = append(pathSegments, f.(string))
 			}
 
+			if len(pathSegments) == 0 {
+				return nil, errors.New("Invalid file path provided in .torrent file")
+			}
+
 			files = append(files, &torrentFile{
 				path:      filepath.Join(pathSegments...),
 				finalSize: int64(bFileLength),
+				wanted:    true,
 			})
 		}
 	} else {
@@ -134,6 +143,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		files = append(files, &torrentFile{
 			path:      f,
 			finalSize: int64(totalSize),
+			wanted:    true,
 		})
 	}
 
@@ -220,7 +230,14 @@ func (t *Torrent) String() string {
 	return sb.String()
 }
 
-// Registers file descriptors with our Torrent and returns files that have to be checked
+/*
+NOTE: Prior to calling this, torrentFiles have a nil file descriptior.
+
+Returns files that have been modified since the torrent was last checked.
+TODO: Since a new torrent instance is created and destroyed each run,
+this doesn't have the intended effect.
+TODO: Check if provided files are wanted
+*/
 func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
 	var filesToCheck []*torrentFile
 	if t.dir != "" {
@@ -247,8 +264,6 @@ func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
 				return nil, err
 			}
 
-			// TODO: Since a new torrent instance is created each run,
-			// this doesn't have the intended effect.
 			if info.ModTime().After(t.lastChecked) {
 				filesToCheck = append(filesToCheck, file)
 			}
@@ -301,7 +316,7 @@ func (t *Torrent) Start() error {
 
 	errs := make(chan error, MAX_PEER_CONNS)
 
-	// TODO: Send peers a have msg when a piece is downloaded
+	// TODO: Send all peers a have msg when a piece is downloaded
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -320,12 +335,12 @@ func (t *Torrent) Start() error {
 		numPeers++
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprint("localhost:", portForTrackerResponse))
+	listenAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprint("localhost:", portForTrackerResponse))
 	if err != nil {
 		return err
 	}
 
-	l, err := net.ListenTCP("tcp", addr)
+	l, err := net.ListenTCP("tcp", listenAddr)
 	if err != nil {
 		return err
 	}
@@ -344,6 +359,7 @@ func (t *Torrent) Start() error {
 		}
 
 		select {
+
 		// NOTE: Make sure errors are only sent when goroutines exit
 		// so we don't go over MAX_PEER_CONNS
 		case e := <-errs:
@@ -360,7 +376,9 @@ func (t *Torrent) Start() error {
 			numPeers++
 		case <-ctx.Done():
 			fmt.Println("COMPLETED", t.metaInfoFileName)
-			// NOTE: Make sure this doesn't happen if the download started at 100% already
+
+			// NOTE: Tracker only expects this once
+			// Make sure this doesn't happen if the download started at 100% already
 			t.sendTrackerMessage(myPeerId, portForTrackerResponse, "completed")
 			return nil
 		default:
@@ -368,6 +386,17 @@ func (t *Torrent) Start() error {
 	}
 }
 
+/*
+	https://wiki.theory.org/BitTorrentSpecification#Tracker_HTTP.2FHTTPS_Protocol
+
+event: If specified, must be one of started, completed, stopped, (or empty which is the same as not being specified). If not specified, then this request is one performed at regular intervals.
+
+started: The first request to the tracker must include the event key with this value.
+
+stopped: Must be sent to the tracker if the client is shutting down gracefully.
+
+completed: Must be sent to the tracker when the download completes. However, must not be sent if the download was already 100% complete when the client started. Presumably, this is to allow the tracker to increment the "completed downloads" metric based solely on this event.
+*/
 func (t *Torrent) sendTrackerMessage(peerId, portForTrackerResponse, event string) (map[string]any, error) {
 	reqURL := url.URL{
 		Opaque: t.trackerHostname,
@@ -406,7 +435,7 @@ func (t *Torrent) sendTrackerMessage(peerId, portForTrackerResponse, event strin
 	}
 
 	p := parser.New(false)
-	response, err := p.ParseResponse(bufio.NewReader(bytes.NewReader(body)))
+	response, err := p.ParseResponse(bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -433,6 +462,8 @@ func (t *Torrent) checkPieceHash(p *pieceData) (bool, error) {
 var PieceNotDownloadedErr error = errors.New("Piece not downloaded yet")
 
 // TODO: Do in parallel?
+
+// Makes sure existing data on disk is verified when the user adds a torrent.
 func (t *Torrent) CheckAllPieces(files []*torrentFile) ([]int, error) {
 	p := newPieceData(t.pieceSize)
 	var existingPieces []int
@@ -472,7 +503,7 @@ func (t *Torrent) CheckAllPieces(files []*torrentFile) ([]int, error) {
 	return existingPieces, nil
 }
 
-// Writes into the provided pieceData, assuming the piece number is initialized
+// Writes into the provided pieceData, assuming the piece number is initialized and in a file we want
 func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 	currPieceSize := t.pieceSize
 	if p.num == t.numPieces-1 {
@@ -522,15 +553,8 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 					return PieceNotDownloadedErr
 				}
 			} else {
-				// Why?
-				// pieceStartIdx - fileStartIdx >= currFile.finalSize
-				// pieceStartIdx >= fileStartIdx + currFile.finalSize
-				// pieceStartIdx >= fileEndIdx
-				// ^ handled above, why reach here?
-				// maybe pieceStartIdx == fileEndIdx
 				if pieceOffsetIntoFile >= currFile.finalSize {
-					panic("very specific condition")
-					break
+					panic("Unreachable")
 				}
 			}
 
@@ -543,7 +567,7 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 					remainingPieceSize -= readSize
 					startReadAt += readSize
 					if remainingPieceSize < 0 {
-						panic("remainingPieceSize < 0")
+						panic("Unreachable: remainingPieceSize < 0")
 					}
 
 					if remainingPieceSize > 0 {
@@ -553,7 +577,7 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 					}
 
 					if startReadAt != currPieceSize {
-						panic("Piece fragments do not add up to a whole piece")
+						panic("Unreachable: Piece fragments do not add up to a whole piece")
 					}
 
 				} else {
@@ -570,7 +594,7 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 					panic("bytesFromEnd will be calculated too high")
 				}
 
-				// TODO: Shouldn't have to subslice as long as the caller calls NewPieceData with correct size
+				// TODO: Shouldn't have to subslice as long as the caller initializes the pieceData with correct size
 				if _, err := currFile.fd.ReadAt(p.data[:bytesFromEOF], pieceOffsetIntoFile); err != nil {
 					return err
 				}
@@ -630,13 +654,8 @@ func (t *Torrent) savePieceToDisk(p *pieceData) error {
 			}
 
 			if fileInfo.Size() >= currFile.finalSize {
-				// Why?
-				// pieceStartIdx - fileStartIdx >= currFile.finalSize
-				// pieceStartIdx >= fileStartIdx + currFile.finalSize
-				// pieceStartIdx >= fileEndIdx
-				// ^ handled above, why reach here?
 				if pieceOffsetIntoFile >= currFile.finalSize {
-					break
+					panic("Unreachable")
 				}
 			}
 
@@ -644,7 +663,7 @@ func (t *Torrent) savePieceToDisk(p *pieceData) error {
 				if remainingPieceSize < currPieceSize {
 					writeSize := min(int(currFile.finalSize), remainingPieceSize)
 					if pieceOffsetIntoFile != 0 {
-						panic("Interesting if this happens")
+						panic("Interesting if this happens, maybe we skipped a piece belonging to a file we didn't want?")
 					}
 					if _, err := currFile.fd.WriteAt(p.data[startWriteAt:startWriteAt+writeSize], 0); err != nil {
 						return err
@@ -834,8 +853,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 
 				// TODO: Add peer to blacklist
 				if !correct {
-					err = fmt.Errorf("Piece %v from %v failed hash check", p.num, peerAddr)
-					errs <- err
+					errs <- fmt.Errorf("Piece %v from %v failed hash check", p.num, peerAddr)
 					return
 				}
 
@@ -929,7 +947,7 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, errs chan<- error, 
 	tempBuf := make([]byte, MAX_RESPONSE_SIZE)
 
 	// Generally 2 minutes: https://wiki.theory.org/BitTorrentSpecification#keep-alive:_.3Clen.3D0000.3E
-	timeout := 2 * time.Second
+	timeout := 5 * time.Second
 	timer := time.NewTimer(timeout)
 
 	for {

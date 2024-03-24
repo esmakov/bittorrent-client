@@ -9,9 +9,12 @@ import (
 	"testing"
 )
 
-// Creates random size files and makes the metainfo file from them,
-// thereby returning a completed Torrent.
-// NOTE: Requires having github.com/pobrn/mktorrent/ in your PATH
+/*
+Creates random size files and makes the metainfo file from them,
+thereby returning a completed Torrent.
+
+NOTE: Requires having github.com/pobrn/mktorrent/ in your PATH
+*/
 func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
 	testDir, err := os.MkdirTemp(".", "torrent_test_")
 	if err != nil {
@@ -311,50 +314,6 @@ func BenchmarkNextAvailablePieceIdx(t *testing.B) {
 		// if n2 != expectedNum {
 		// 	t.Fatalf("Expected %v, got %v\n", expectedNum, n2)
 		// }
-	}
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func BenchmarkNextAvailablePieceIdx2(t *testing.B) {
-	torr, err := createTorrentWithTestData(
-		3,
-		32*1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// We should want all the pieces now
-	if err := os.RemoveAll(torr.dir); err != nil {
-		t.Fatal(err)
-	}
-
-	pieceNum := rand.Intn(torr.numPieces)
-	p := newPieceData(torr.numPieces)
-	p.num = pieceNum
-
-	var expectedNum int
-	if p.num == torr.numPieces {
-		expectedNum = 0
-	} else {
-		expectedNum = p.num + 1
-	}
-
-	peerBitfield := make([]byte, len(torr.bitfield))
-	for i := range len(peerBitfield) {
-		peerBitfield[i] |= 0xFF
-		torr.bitfield[i] &= 0x00
-	}
-
-	for i := 0; i < t.N; i++ {
-		n2, err2 := nextAvailablePieceIdx2(p.num, torr.numPieces, peerBitfield, torr.bitfield)
-		if err2 != nil {
-			t.Fatal(err2)
-		}
-		if n2 != expectedNum {
-			t.Fatalf("Expected %v, got %v\n", expectedNum, n2)
-		}
 	}
 	if err := os.Remove(torr.metaInfoFileName); err != nil {
 		t.Fatal(err)

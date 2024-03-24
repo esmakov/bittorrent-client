@@ -19,12 +19,14 @@ func main() {
 	treeCmd := flag.NewFlagSet("tree", flag.ExitOnError)
 
 	if len(os.Args) < 3 {
-		fmt.Println("USAGE: [command] [.torrent]")
+		fmt.Println("USAGE: <command> <.torrent>")
+		fmt.Println("Commands are any one of 'add' or 'tree'")
 		return
 	}
 	metaInfoFileName := os.Args[2]
+
 	if filepath.Ext(metaInfoFileName) != ".torrent" {
-		fmt.Printf("%v is not of type .torrent\n", metaInfoFileName)
+		fmt.Println(metaInfoFileName, "is not of type .torrent")
 		return
 	}
 
@@ -53,7 +55,7 @@ func main() {
 		}
 
 		if t.IsComplete() {
-			fmt.Printf("%v is complete, starting to seed...\n", metaInfoFileName)
+			fmt.Println(metaInfoFileName, "is complete, starting to seed...")
 			// TODO: Start seeding
 			return
 		}
