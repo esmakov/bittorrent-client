@@ -134,7 +134,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 			files = append(files, &torrentFile{
 				path:      filepath.Join(pathSegments...),
 				finalSize: int64(bFileLength),
-				wanted:    true,
+				wanted:    true, // TODO: Set appropriately
 			})
 		}
 	} else {
@@ -143,7 +143,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		files = append(files, &torrentFile{
 			path:      f,
 			finalSize: int64(totalSize),
-			wanted:    true,
+			wanted:    true, // TODO: Set appropriately
 		})
 	}
 
@@ -823,8 +823,10 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
 			}
 
-			if blockOffset < lastBlockOffset { // Incomplete piece
-				blockOffset += BLOCK_SIZE // Account for block just downloaded
+			// Incomplete piece
+			if blockOffset < lastBlockOffset {
+				// Account for block just downloaded
+				blockOffset += BLOCK_SIZE
 				remaining := currPieceSize - blockOffset
 				if remaining < BLOCK_SIZE {
 					currBlockSize = remaining

@@ -247,7 +247,7 @@ func getPeerId() string {
 	return "edededededededededed"
 }
 
-// TODO: Do I need more than one?
+// TODO: Do we need more than one?
 func getNextFreePort() string {
 	return "6881"
 }

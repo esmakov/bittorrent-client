@@ -9,7 +9,7 @@ go run main <command> <path/to/file.torrent>
 ```
 
 Where:
-- <command> is required and can be one of the following:
+- \<command\> is required and can be one of the following:
   - add: Add a new torrent and start downloading.
   - tree: Display the torrent file structure.
 - <path/to/file.torrent> is the required path to a .torrent file.

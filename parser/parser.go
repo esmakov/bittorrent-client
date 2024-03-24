@@ -17,6 +17,8 @@ type btTokenKinds int
 
 const (
 	btZeroVal btTokenKinds = iota
+	// https://wiki.theory.org/BitTorrentSpecification#Bencoding
+	// NOTE: The maximum number of bit of this integer is unspecified, but to handle it as a signed 64bit integer is mandatory to handle "large files" aka .torrent for more that 4Gbyte.
 	btNum
 	btStr
 	btListStart

@@ -19,39 +19,38 @@ func main() {
 	treeCmd := flag.NewFlagSet("tree", flag.ExitOnError)
 
 	if len(os.Args) < 3 {
-		fmt.Println("USAGE: <command> <.torrent>")
-		fmt.Println("Commands are any one of 'add' or 'tree'")
-		return
+		fmt.Println("USAGE: <command> <.torrent>\nwhere commands are any one of 'add' or 'tree'")
+		os.Exit(1)
 	}
 	metaInfoFileName := os.Args[2]
 
 	if filepath.Ext(metaInfoFileName) != ".torrent" {
 		fmt.Println(metaInfoFileName, "is not of type .torrent")
-		return
+		os.Exit(1)
 	}
 
 	switch os.Args[1] {
 	case "tree":
 		if err := treeCmd.Parse(os.Args[3:]); err != nil {
 			fmt.Println(err)
-			return
+			os.Exit(1)
 		}
 
 		_, err := torrent.New(metaInfoFileName, true)
 		if err != nil {
 			fmt.Println(err)
-			return
+			os.Exit(1)
 		}
 	case "add":
 		if err := addCmd.Parse(os.Args[3:]); err != nil {
 			fmt.Println(err)
-			return
+			os.Exit(1)
 		}
 
 		t, err := openAndCheckTorrent(metaInfoFileName, false)
 		if err != nil {
 			fmt.Println(err)
-			return
+			os.Exit(1)
 		}
 
 		if t.IsComplete() {
@@ -64,11 +63,11 @@ func main() {
 
 		if err := t.Start(); err != nil {
 			fmt.Printf("Torrent %v failed in Start: %v\n", metaInfoFileName, err)
-			return
+			os.Exit(1)
 		}
 	default:
 		fmt.Println("USAGE: No such subcommand")
-		return
+		os.Exit(1)
 	}
 	return
 }
