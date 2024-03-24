@@ -193,19 +193,6 @@ func (t *Torrent) IsComplete() bool {
 	return t.piecesDownloaded == t.numPieces
 }
 
-func (t *Torrent) SavedPieceNums() (nums []int) {
-	for i := 0; i < len(t.bitfield); i++ {
-		for bitsFromRight := 7; bitsFromRight >= 0; bitsFromRight-- {
-			mask := byte(1 << bitsFromRight)
-			if t.bitfield[i]&mask != 0 {
-				pieceNum := i*8 + (7 - bitsFromRight)
-				nums = append(nums, pieceNum)
-			}
-		}
-	}
-	return
-}
-
 func (t *Torrent) String() string {
 	sb := strings.Builder{}
 	if t.isPrivate {
@@ -1080,7 +1067,8 @@ func bitfieldContains(bitfield []byte, pieceNum int) bool {
 	return false
 }
 
-// Sequentially chooses the number of a piece we want
+// TODO: Don't select pieces from unwanted files
+// Sequentially chooses the next piece to download, assuming we want all of them
 func nextAvailablePieceIdx(currPieceNum, numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
 	nextPieceNum := currPieceNum + 1
 
