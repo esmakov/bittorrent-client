@@ -1,5 +1,4 @@
-A minimal bittorrent client with no dependencies outside the Go standard library.
-Made purely as a learning project, USE AT YOUR OWN RISK.
+A minimal bittorrent client made purely as a learning project, USE AT YOUR OWN RISK.
 
 The [mktorrent](github.com/pobrn/mktorrent/) package is required to build test code.
 
