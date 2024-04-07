@@ -39,7 +39,7 @@ type Torrent struct {
 	piecesDownloaded int
 	piecesUploaded   int
 	bitfield         []byte
-	files            []*torrentFile
+	files            []*TorrentFile
 	lastChecked      time.Time
 	dir              string
 	// Optionally sent by server
@@ -51,13 +51,14 @@ type Torrent struct {
 	sync.Mutex
 }
 
-type torrentFile struct {
+type TorrentFile struct {
 	fd        *os.File
-	path      string
+	Path      string
 	finalSize int64
-	wanted    bool
+	Wanted    bool
 }
 
+// Initializes the Torrent state with nil file descriptors.
 func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	fileBytes, err := os.ReadFile(metaInfoFileName)
 	if err != nil {
@@ -82,7 +83,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	bPieces := bInfo["pieces"].(string)
 	numPieces := len(bPieces) / 20
 
-	bitfieldLen := int(math.Ceil(float64(numPieces) / 8.0))
+	bitfieldLen := int(math.Ceil(float64(numPieces) / 8))
 	bitfield := make([]byte, bitfieldLen)
 
 	// Optional common fields
@@ -107,7 +108,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 
 	var (
 		totalSize int
-		files     []*torrentFile
+		files     []*TorrentFile
 		dir       string
 	)
 
@@ -131,19 +132,17 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 				return nil, errors.New("Invalid file path provided in .torrent file")
 			}
 
-			files = append(files, &torrentFile{
-				path:      filepath.Join(pathSegments...),
+			files = append(files, &TorrentFile{
+				Path:      filepath.Join(pathSegments...),
 				finalSize: int64(bFileLength),
-				wanted:    true, // TODO: Set appropriately
 			})
 		}
 	} else {
 		f := bInfo["name"].(string)
 		totalSize = bInfo["length"].(int)
-		files = append(files, &torrentFile{
-			path:      f,
+		files = append(files, &TorrentFile{
+			Path:      f,
 			finalSize: int64(totalSize),
-			wanted:    true, // TODO: Set appropriately
 		})
 	}
 
@@ -199,61 +198,82 @@ func (t *Torrent) String() string {
 		sb.WriteString(fmt.Sprint("PRIVATE TORRENT"))
 	}
 
+	numWanted := 0
+	for _, file := range t.files {
+		if file.Wanted {
+			numWanted++
+		}
+	}
+
 	sb.WriteString(fmt.Sprint(
 		fmt.Sprintln("--------------Torrent Info--------------"),
 		fmt.Sprintln("Torrent file:", t.metaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
-		fmt.Sprintln("Total size: ", t.totalSize),
-		fmt.Sprintf("%v file(s): \n", len(t.files)),
+		fmt.Sprintln("Total size:", t.totalSize),
+		fmt.Sprintf("Selected %v of %v total file(s):\n", numWanted, len(t.files)),
 	))
 
 	for _, file := range t.files {
-		sb.WriteString(fmt.Sprintf("  %v\n", file.fd.Name()))
+		marker := "N"
+		if file.Wanted {
+			marker = "Y"
+		}
+		sb.WriteString(fmt.Sprintf("  [%v] %v\n", marker, filepath.Base(file.Path)))
 	}
 
 	if t.comment != "" {
 		sb.WriteString(fmt.Sprintln("Comment:", t.comment))
 	}
+	sb.WriteString("----------------------------------------")
 	return sb.String()
 }
 
-/*
-NOTE: Prior to calling this, torrentFiles have a nil file descriptior.
+// Returns the TorrentFiles by pointer so their Wanted field can be updated with user input in main.main()
+func (t *Torrent) Files() []*TorrentFile {
+	return t.files
+}
 
-Returns files that have been modified since the torrent was last checked.
+/*
+Opens the TorrentFiles for writing and returns the ones that have been modified since the torrent was last checked.
+
 TODO: Since a new torrent instance is created and destroyed each run,
-this doesn't have the intended effect.
-TODO: Check if provided files are wanted
+the lastChecked field doesn't persist and we aren't able to save time by not
+checking files.
+NOTE: Prior to calling this, torrentFiles have a nil file descriptior.
 */
-func (t *Torrent) OpenOrCreateFiles() ([]*torrentFile, error) {
-	var filesToCheck []*torrentFile
+func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
+	var filesToCheck []*TorrentFile
 	if t.dir != "" {
 		os.Mkdir(t.dir, 0o766)
 	}
 	for _, file := range t.files {
-		if t.dir != "" {
-			file.path = filepath.Join(t.dir, file.path)
+		if !file.Wanted {
+			continue
 		}
 
-		fd, err := os.OpenFile(file.path, os.O_RDWR, 0)
+		if t.dir != "" {
+			file.Path = filepath.Join(t.dir, file.Path)
+		}
+
+		fd, err := os.OpenFile(file.Path, os.O_RDWR, 0)
 		if errors.Is(err, fs.ErrNotExist) {
-			fd, err = os.Create(file.path)
+			fd, err = os.Create(file.Path)
 			if err != nil {
 				return nil, err
 			}
 			file.fd = fd
 		} else if err != nil {
 			return nil, err
-		} else {
-			file.fd = fd
-			info, err := os.Stat(file.fd.Name())
-			if err != nil {
-				return nil, err
-			}
+		}
 
-			if info.ModTime().After(t.lastChecked) {
-				filesToCheck = append(filesToCheck, file)
-			}
+		file.fd = fd
+		info, err := os.Stat(file.fd.Name())
+		if err != nil {
+			return nil, err
+		}
+
+		if info.ModTime().After(t.lastChecked) {
+			filesToCheck = append(filesToCheck, file)
 		}
 	}
 
@@ -446,19 +466,18 @@ func (t *Torrent) checkPieceHash(p *pieceData) (bool, error) {
 	return string(givenHash) == t.piecesStr[p.num*20:p.num*20+20], nil
 }
 
-var PieceNotDownloadedErr error = errors.New("Piece not downloaded yet")
-
-// TODO: Do in parallel?
+var PieceNotOnDiskErr error = errors.New("Piece not wanted or not downloaded yet")
 
 // Makes sure existing data on disk is verified when the user adds a torrent.
-func (t *Torrent) CheckAllPieces(files []*torrentFile) ([]int, error) {
+// TODO: Do in parallel?
+func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 	p := newPieceData(t.pieceSize)
 	var existingPieces []int
 
 	for i := 0; i < t.numPieces; i++ {
 		p.num = i
 		err := t.getPieceFromDisk(p)
-		if err == PieceNotDownloadedErr {
+		if err == PieceNotOnDiskErr {
 			continue
 		} else if err != nil {
 			return existingPieces, err
@@ -500,13 +519,13 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
 	if len(t.files) == 1 {
-		fileInfo, err := os.Stat(t.files[0].path)
+		fileInfo, err := os.Stat(t.files[0].Path)
 		if err != nil {
 			return err
 		}
 
 		if pieceStartIdx >= fileInfo.Size() {
-			return PieceNotDownloadedErr
+			return PieceNotOnDiskErr
 		}
 		_, err = t.files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
 		return err
@@ -517,8 +536,10 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 	remainingPieceSize := currPieceSize
 	startReadAt := 0
 
-	for i := 0; i < len(t.files); i++ {
-		currFile := t.files[i]
+	for _, currFile := range t.files {
+		if !currFile.Wanted {
+			continue
+		}
 		fileEndIdx := fileStartIdx + currFile.finalSize
 
 		if pieceStartIdx > fileEndIdx {
@@ -526,7 +547,7 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 			continue
 		}
 
-		fileInfo, err := os.Stat(currFile.path)
+		fileInfo, err := os.Stat(currFile.Path)
 		if err != nil {
 			return err
 		}
@@ -537,7 +558,7 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 
 			if fileInfo.Size() < currFile.finalSize {
 				if pieceOffsetIntoFile >= fileInfo.Size() {
-					return PieceNotDownloadedErr
+					return PieceNotOnDiskErr
 				}
 			} else {
 				if pieceOffsetIntoFile >= currFile.finalSize {
@@ -627,7 +648,7 @@ func (t *Torrent) savePieceToDisk(p *pieceData) error {
 			continue
 		}
 
-		fileInfo, err := os.Stat(currFile.path)
+		fileInfo, err := os.Stat(currFile.Path)
 		if err != nil {
 			return err
 		}
@@ -779,11 +800,10 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 			// TODO: Determine if we want to talk to this peer
 			outboundMsgs <- createUnchokeMsg()
 		case request:
-			err := t.retrieveAndSendPiece(msg.pieceNum, msg.blockSize, outboundMsgs)
+			err := t.handlePieceRequest(msg.pieceNum, msg.blockSize, outboundMsgs)
 			if err != nil {
 				// Drop connection?
-				log.Println("Retrieving piece:", err)
-				continue
+				log.Println("Error retrieving piece:", err)
 			}
 		case keepalive:
 		case choke:
@@ -885,11 +905,12 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 	}
 }
 
-func (t *Torrent) retrieveAndSendPiece(pieceNum int, blockSize int, outboundMsgs chan<- []byte) error {
+// Retrieves and sends piece data block by block
+func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs chan<- []byte) error {
 	havePiece := bitfieldContains(t.bitfield, pieceNum)
 	if !havePiece {
 		outboundMsgs <- createChokeMsg()
-		return PieceNotDownloadedErr
+		return PieceNotOnDiskErr
 	}
 
 	currPieceSize := t.pieceSize

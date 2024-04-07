@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 
 	"github.com/esmakov/bittorrent-client/hash"
 	"github.com/esmakov/bittorrent-client/stack"
@@ -215,10 +216,7 @@ func (p parser) prettyPrint(t btToken) {
 		return
 	}
 
-	for i := p.indentLevel; i > 0; i-- {
-		fmt.Print("\t")
-	}
-	fmt.Println(t.tokenKind, t.lexeme)
+	fmt.Println(strings.Repeat("\t", p.indentLevel), t.tokenKind, t.lexeme)
 }
 
 func (p *parser) splitFunc(data []byte, atEOF bool) (bytesToAdvance int, token []byte, err error) {

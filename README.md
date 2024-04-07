@@ -4,7 +4,7 @@ Made purely as a learning project, USE AT YOUR OWN RISK.
 The [mktorrent](github.com/pobrn/mktorrent/) package is required to build test code.
 
 # Usage
-```shell
+```console
 go run main <command> <path/to/file.torrent>
 ```
 
