@@ -474,8 +474,7 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 	p := newPieceData(t.pieceSize)
 	var existingPieces []int
 
-	for i := 0; i < t.numPieces; i++ {
-		p.num = i
+	for p.num = range t.numPieces {
 		err := t.getPieceFromDisk(p)
 		if err == PieceNotOnDiskErr {
 			continue

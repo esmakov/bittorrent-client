@@ -216,7 +216,11 @@ func (p parser) prettyPrint(t btToken) {
 		return
 	}
 
-	fmt.Println(strings.Repeat("\t", p.indentLevel), t.tokenKind, t.lexeme)
+	if len(t.lexeme) > 200 {
+		fmt.Printf("%v %v %q\n", strings.Repeat("\t", p.indentLevel), t.tokenKind, t.lexeme[:200]+"...")
+	} else {
+		fmt.Printf("%v %v %q\n", strings.Repeat("\t", p.indentLevel), t.tokenKind, t.lexeme)
+	}
 }
 
 func (p *parser) splitFunc(data []byte, atEOF bool) (bytesToAdvance int, token []byte, err error) {

@@ -4,11 +4,10 @@ The [mktorrent](github.com/pobrn/mktorrent/) package is required to build test c
 
 # Usage
 ```console
-go run main <command> <path/to/file.torrent>
+go run main <add>|<tree> <path/to/file.torrent>
 ```
 
-Where:
-- \<command\> is required and can be one of the following:
+- Two commands are supported:
   - add: Add a new torrent and start downloading.
   - tree: Display the torrent file structure.
 - <path/to/file.torrent> is the required path to a .torrent file.
@@ -25,11 +24,9 @@ Where:
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
-- Selecting files to download
+- Run in background
 - Specify destination directory
 - Specify log level and log destination
-- Sanitize torrent file against terminal control characters for printing
-- Run in background
 - More subcommands: remove, pause/resume
 
 ### Optimizations

@@ -56,6 +56,7 @@ func (m messageKinds) String() string {
 	}
 }
 
+// TODO: Move away from single type for all messages
 type peerMessage struct {
 	kind        messageKinds
 	totalSize   int
