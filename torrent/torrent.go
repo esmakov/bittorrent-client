@@ -1,7 +1,6 @@
 package torrent
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -58,7 +57,7 @@ type TorrentFile struct {
 	Wanted    bool
 }
 
-// Initializes the Torrent state with nil file descriptors.
+// Initializes the Torrent state with nil file descriptors and no notion of which files are wanted.
 func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	fileBytes, err := os.ReadFile(metaInfoFileName)
 	if err != nil {
@@ -366,7 +365,6 @@ func (t *Torrent) Start() error {
 		}
 
 		select {
-
 		// NOTE: Make sure errors are only sent when goroutines exit
 		// so we don't go over MAX_PEER_CONNS
 		case e := <-errs:
@@ -442,7 +440,7 @@ func (t *Torrent) sendTrackerMessage(peerId, portForTrackerResponse, event strin
 	}
 
 	p := parser.New(false)
-	response, err := p.ParseResponse(bytes.NewReader(body))
+	response, err := p.ParseTrackerResponse(body)
 	if err != nil {
 		return nil, err
 	}
@@ -1070,23 +1068,19 @@ func extractCompactPeers(s string) ([]string, error) {
 	return list, nil
 }
 
+// TODO: Implement a version that operates on a Torrent so it can be locked for thread safety
 func updateBitfield(bitfield []byte, pieceNum int) {
-	pieceByteIdx := pieceNum / 8
+	b := &bitfield[pieceNum/8]
 	bitsFromRight := 7 - (pieceNum % 8)
-	b := &bitfield[pieceByteIdx]
 	mask := uint8(0x01) << bitsFromRight
 	*b |= mask
 }
 
 func bitfieldContains(bitfield []byte, pieceNum int) bool {
-	pieceByteIdx := pieceNum / 8
+	b := bitfield[pieceNum/8]
 	bitsFromRight := 7 - (pieceNum % 8)
-	b := bitfield[pieceByteIdx]
 	mask := uint8(0x01) << bitsFromRight
-	if b&mask != 0 {
-		return true
-	}
-	return false
+	return b&mask != 0
 }
 
 // TODO: Don't select pieces from unwanted files
