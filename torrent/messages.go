@@ -2,7 +2,6 @@ package torrent
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"slices"
 )
@@ -68,11 +67,10 @@ type peerMessage struct {
 	blockData   []byte
 }
 
-// Sometimes multiple messages will be read from the stream at once
+// parseMultiMessage will parse a chunk of bytes for multiple sequential messages until empty
 func parseMultiMessage(buf, infoHash []byte) ([]peerMessage, error) {
 	var msgList []peerMessage
 	for i := 0; i < len(buf)-1; {
-		// Chop off one message at a time
 		msg, err := parseMessage(buf[i:], infoHash)
 		if err != nil {
 			return nil, err
@@ -84,11 +82,13 @@ func parseMultiMessage(buf, infoHash []byte) ([]peerMessage, error) {
 }
 
 func parseMessage(buf, infoHash []byte) (msg peerMessage, e error) {
-	handshakeStart := []byte{0x13, 0x42, 0x69, 0x74, 0x54}
-	bufStart := buf[:len(handshakeStart)]
-	if slices.Equal(bufStart, handshakeStart) {
-		msg, e = parseAndVerifyHandshake(buf, infoHash)
-		return
+	handshakeStart := string(rune(0x13)) + "BitTorrent protocol" // Only version 1.0 supported
+	if len(buf) >= len(handshakeStart) {
+		bufStart := buf[:len(handshakeStart)]
+		if string(bufStart) == handshakeStart {
+			msg, e = parseAndVerifyHandshake(buf, infoHash)
+			return
+		}
 	}
 
 	if len(buf) == 4 {
@@ -97,10 +97,9 @@ func parseMessage(buf, infoHash []byte) (msg peerMessage, e error) {
 		return
 	}
 
-	lenBytes := binary.BigEndian.Uint32(buf[:4])
-	lenVal := int(lenBytes)
+	statedLen := int(binary.BigEndian.Uint32(buf[:4]))
 
-	if lenVal > len(buf) || len(buf) < 4 {
+	if statedLen > len(buf) || len(buf) < 4 {
 		// Message needs to be reassembled from this packet and the next
 		// fmt.Printf("Message is %v bytes long but we only have %v so far\n", lenVal, len(buf))
 		msg.kind = fragment
@@ -115,7 +114,7 @@ func parseMessage(buf, infoHash []byte) (msg peerMessage, e error) {
 		msg.pieceNum = int(binary.BigEndian.Uint32(buf[5:9]))
 	}
 
-	msg.totalSize = lenVal + 4 // Include length prefix
+	msg.totalSize = statedLen + 4 // Include length prefix
 
 	if msg.totalSize > len(buf) {
 		panic(fmt.Sprintf("Out of bounds of msg buffer: %v / %v", msg.totalSize, len(buf)))
@@ -136,23 +135,24 @@ func parseMessage(buf, infoHash []byte) (msg peerMessage, e error) {
 }
 
 func parseAndVerifyHandshake(buf []byte, expectedInfoHash []byte) (peerMessage, error) {
-	msg := peerMessage{}
-	protocolLen := int(buf[0]) // Should be 19 or 0x13
+	protocolLen := int(buf[0])
+	if protocolLen != 19 {
+		return peerMessage{}, ErrUnsupportedProtocol
+	}
 
-	// protocolBytes := buf[1 : protocolLen+1]
-	// reservedBytes := buf[protocolLen+1 : protocolLen+9]
+	reservedBytes := buf[protocolLen+1 : protocolLen+9]
+	_ = reservedBytes
 
 	theirInfoHash := buf[protocolLen+9 : protocolLen+29]
 	if !slices.Equal(theirInfoHash, expectedInfoHash) {
-		return msg, errors.New("Peer did not respond with correct info hash")
+		return peerMessage{}, ErrBadInfoHash
 	}
 
-	peerId := buf[protocolLen+29 : protocolLen+49]
-
-	msg.kind = handshake
-	msg.totalSize = protocolLen + 49
-	msg.peerId = peerId
-	return msg, nil
+	return peerMessage{
+		kind:      handshake,
+		totalSize: protocolLen + 49,
+		peerId:    buf[protocolLen+29 : protocolLen+49],
+	}, nil
 }
 
 // <pstrlen><pstr><reserved><info_hash><peer_id>
@@ -204,8 +204,8 @@ func createRequestMsg(pieceNum, offset, length int) []byte {
 
 	payload := []uint32{uint32(pieceNum), uint32(offset), uint32(length)}
 	for i, v := range payload {
-		index := 5 + i*4
-		binary.BigEndian.PutUint32(bytes[index:index+4], v)
+		idx := 5 + i*4
+		binary.BigEndian.PutUint32(bytes[idx:idx+4], v)
 	}
 
 	return bytes

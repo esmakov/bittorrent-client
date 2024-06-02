@@ -19,12 +19,13 @@ go run main <add>|<tree> <path/to/file.torrent>
 - Downloads single or multi-file torrents
 - Checks existing data on disk and picks up from where you left off
 
-### Supported BEPs
+### Supported BEPs (BitTorrent Enhancement Proposals)
 - 3: Basic BitTorrent protocol (in progress)
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
 - Run in background
+- Blacklist misbehaving peers
 - Specify destination directory
 - Specify log level and log destination
 - More subcommands: remove, pause/resume

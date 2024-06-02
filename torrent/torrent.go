@@ -26,27 +26,30 @@ import (
 )
 
 type Torrent struct {
-	metaInfoFileName string
-	trackerHostname  string
-	comment          string
-	infoHash         []byte
-	isPrivate        bool
-	piecesStr        string
-	pieceSize        int
-	numPieces        int
-	totalSize        int
-	piecesDownloaded int
-	piecesUploaded   int
-	bitfield         []byte
-	files            []*TorrentFile
-	lastChecked      time.Time
-	dir              string
+	metaInfoFileName       string
+	trackerHostname        string
+	comment                string
+	infoHash               []byte
+	isPrivate              bool
+	piecesStr              string
+	pieceSize              int
+	numPieces              int
+	totalSize              int
+	piecesDownloaded       int
+	piecesUploaded         int
+	bitfield               []byte
+	files                  []*TorrentFile
+	lastChecked            time.Time
+	dir                    string
+	portForTrackerResponse string
 	// Optionally sent by server
 	trackerId string
 	seeders   int
 	leechers  int
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
-	// numInterested // for connection limit
+
+	// for connection limit on a per-torrent basis
+	// numInterested
 	sync.Mutex
 }
 
@@ -146,18 +149,19 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	}
 
 	t := &Torrent{
-		metaInfoFileName: metaInfoFileName,
-		trackerHostname:  announce,
-		infoHash:         infoHash,
-		comment:          comment,
-		isPrivate:        isPrivate == 1,
-		piecesStr:        bPieces,
-		pieceSize:        bPieceLength,
-		numPieces:        numPieces,
-		totalSize:        totalSize,
-		bitfield:         bitfield,
-		files:            files,
-		dir:              dir,
+		metaInfoFileName:       metaInfoFileName,
+		trackerHostname:        announce,
+		infoHash:               infoHash,
+		comment:                comment,
+		isPrivate:              isPrivate == 1,
+		piecesStr:              bPieces,
+		pieceSize:              bPieceLength,
+		numPieces:              numPieces,
+		totalSize:              totalSize,
+		bitfield:               bitfield,
+		files:                  files,
+		dir:                    dir,
+		portForTrackerResponse: getNextFreePort(),
 	}
 
 	return t, nil
@@ -279,13 +283,51 @@ func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
 	return filesToCheck, nil
 }
 
-const MAX_PEER_CONNS = 1
+const (
+	/*
+	   "Implementer's Note: Even 30 peers is plenty, the official client version 3
+	   in fact only actively forms new connections if it has less than 30 peers and
+	   will refuse connections if it has 55. This value is important to performance.
+	   When a new piece has completed download, HAVE messages (see below) will need
+	   to be sent to most active peers. As a result the cost of broadcast traffic
+	   grows in direct proportion to the number of peers. Above 25, new peers are
+	   highly unlikely to increase download speed. UI designers are strongly advised
+	   to make this obscure and hard to change as it is very rare to be useful to do so." */
+	EFFECTIVE_MAX_PEER_CONNS = 25
+	// TODO: Expose to user
+	USER_DESIRED_PEER_CONNS = 1
+	DIAL_TIMEOUT            = 3 * time.Second
+	MESSAGE_TIMEOUT         = 5 * time.Second
+)
 
-func (t *Torrent) Start() error {
+/*
+	https://wiki.theory.org/BitTorrentSpecification#Tracker_HTTP.2FHTTPS_Protocol
+
+"event: If specified, must be one of started, completed, stopped, (or empty which is the same as not being specified). If not specified, then this request is one performed at regular intervals.
+
+started: The first request to the tracker must include the event key with this value.
+
+stopped: Must be sent to the tracker if the client is shutting down gracefully.
+
+completed: Must be sent to the tracker when the download completes. However, must not be sent if the download was already 100% complete when the client started. Presumably, this is to allow the tracker to increment the "completed downloads" metric based solely on this event."
+*/
+type trackerEventKinds string
+
+const (
+	startedEvent   trackerEventKinds = "started"
+	stoppedEvent   trackerEventKinds = "stopped"
+	completedEvent trackerEventKinds = "completed"
+)
+
+/*
+StartConns sends the "started" message to the tracker and then runs for the lifetime of the program.
+
+StartConns will attempt to net.Dial as many connections as desired by the user, as long as there are enough peers in the swarm. It also kicks off a separate goroutine that listens for incoming connections.
+*/
+func (t *Torrent) StartConns() error {
 	myPeerId := getPeerId()
-	portForTrackerResponse := getNextFreePort()
 
-	trackerResponse, err := t.sendTrackerMessage(myPeerId, portForTrackerResponse, "started")
+	trackerResponse, err := t.sendTrackerMessage(myPeerId, startedEvent)
 	if err != nil {
 		return err
 	}
@@ -320,103 +362,133 @@ func (t *Torrent) Start() error {
 		// TODO: Keep polling tracker for peers in a separate goroutine
 	}
 
-	errs := make(chan error, MAX_PEER_CONNS)
+	// If something goes wrong in handleConn or chooseResponse,
+	// they send to errs before exiting. A suitably large buffer is
+	// probably needed to make sure they don't block on error reporting
+	// before exiting.
+	errs := make(chan error, USER_DESIRED_PEER_CONNS*2)
 
-	// TODO: Send all peers a have msg when a piece is downloaded
+	// TODO: Send all peers a 'have' msg when a piece is downloaded
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	numPeers := 0
-	for numPeers < MAX_PEER_CONNS {
+	maxPeers := min(len(peerList), USER_DESIRED_PEER_CONNS, EFFECTIVE_MAX_PEER_CONNS)
+	for numPeers < maxPeers {
 		// TODO: Choose more intelligently
-		peer := getRandPeer(peerList)
-		conn, err := net.DialTimeout("tcp", peer, 1*time.Second)
+		conn, err := net.DialTimeout("tcp", getRandPeer(peerList), DIAL_TIMEOUT)
 		if err != nil {
-			log.Println("Dial:", err)
+			log.Println(err)
 			continue
 		}
 
-		go t.handleConn(conn, []byte(myPeerId), errs, ctx, cancel)
+		go t.handleConn(ctx, cancel, conn, []byte(myPeerId), errs)
 		numPeers++
 	}
 
-	listenAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprint("localhost:", portForTrackerResponse))
-	if err != nil {
-		return err
-	}
-
-	l, err := net.ListenTCP("tcp", listenAddr)
-	if err != nil {
-		return err
-	}
-	defer l.Close()
+	numPeersChan := make(chan int, 2)
+	go t.acceptConns(ctx, numPeers, maxPeers, numPeersChan, myPeerId, errs)
 
 	for {
-		if numPeers < MAX_PEER_CONNS {
-			conn, err := l.AcceptTCP()
-			if err != nil {
-				log.Println("Accept:", err)
-				continue
-			}
-			log.Printf("Incoming connection from %v\n", conn.RemoteAddr())
-			go t.handleConn(conn, []byte(myPeerId), errs, ctx, cancel)
-			numPeers++
-		}
-
 		select {
 		// NOTE: Make sure errors are only sent when goroutines exit
-		// so we don't go over MAX_PEER_CONNS
+		// so we don't go over EFFECTIVE_MAX_PEER_CONNS
+		case n := <-numPeersChan:
+			numPeers = n
 		case e := <-errs:
+			if errors.Is(e, ErrBadInfoHash) || errors.Is(e, ErrUnsupportedProtocol) {
+				// TODO: Add to blacklist
+			}
 			numPeers--
+			numPeersChan <- numPeers
 			log.Println("Conn dropped:", e)
 
-			peer := getRandPeer(peerList)
-			conn, err := net.DialTimeout("tcp", peer, 1*time.Second)
+			conn, err := net.DialTimeout("tcp", getRandPeer(peerList), DIAL_TIMEOUT)
 			if err != nil {
-				log.Println("Dial:", err)
+				log.Println(err)
 				continue
 			}
-			go t.handleConn(conn, []byte(myPeerId), errs, ctx, cancel)
+			go t.handleConn(ctx, cancel, conn, []byte(myPeerId), errs)
 			numPeers++
+			numPeersChan <- numPeers
 		case <-ctx.Done():
 			fmt.Println("COMPLETED", t.metaInfoFileName)
 
 			// NOTE: Tracker only expects this once
 			// Make sure this doesn't happen if the download started at 100% already
-			t.sendTrackerMessage(myPeerId, portForTrackerResponse, "completed")
+			t.sendTrackerMessage(myPeerId, completedEvent)
 			return nil
 		default:
+			// Multiple successive errors occurred to get here
+			if numPeers < maxPeers {
+				conn, err := net.DialTimeout("tcp", getRandPeer(peerList), DIAL_TIMEOUT)
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+				go t.handleConn(ctx, cancel, conn, []byte(myPeerId), errs)
+				numPeers++
+				numPeersChan <- numPeers
+			}
 		}
 	}
 }
 
-/*
-	https://wiki.theory.org/BitTorrentSpecification#Tracker_HTTP.2FHTTPS_Protocol
+func (t *Torrent) acceptConns(ctx context.Context, numPeers, maxPeers int, numPeersChan chan int, myPeerId string, errs chan error) {
+	listenAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprint(":", t.portForTrackerResponse))
+	if err != nil {
+		log.Println(err)
+	}
 
-event: If specified, must be one of started, completed, stopped, (or empty which is the same as not being specified). If not specified, then this request is one performed at regular intervals.
+	listener, err := net.ListenTCP("tcp", listenAddr)
+	if err != nil {
+		log.Println(err)
+	}
+	defer listener.Close()
 
-started: The first request to the tracker must include the event key with this value.
+	println("Listening...")
 
-stopped: Must be sent to the tracker if the client is shutting down gracefully.
+	for {
+		select {
+		case n := <-numPeersChan:
+			numPeers = n
+		case <-ctx.Done():
+			log.Println("No longer accepting conns")
+			return
+		default:
+		}
+		if numPeers < maxPeers {
+			conn, err := listener.AcceptTCP()
+			if err != nil {
+				log.Println("Accept:", err)
+				continue
+			}
+			log.Printf("Incoming conn from %v\n", conn.RemoteAddr())
+			newCtx, newCancel := context.WithCancel(ctx)
+			go t.handleConn(newCtx, newCancel, conn, []byte(myPeerId), errs)
+			numPeers++
+			numPeersChan <- numPeers
+		}
+	}
+}
 
-completed: Must be sent to the tracker when the download completes. However, must not be sent if the download was already 100% complete when the client started. Presumably, this is to allow the tracker to increment the "completed downloads" metric based solely on this event.
-*/
-func (t *Torrent) sendTrackerMessage(peerId, portForTrackerResponse, event string) (map[string]any, error) {
+func (t *Torrent) sendTrackerMessage(peerId string, event trackerEventKinds) (map[string]any, error) {
 	reqURL := url.URL{
 		Opaque: t.trackerHostname,
 	}
 	queryParams := url.Values{}
 	queryParams.Set("peer_id", peerId)
-	queryParams.Set("port", portForTrackerResponse)
+	queryParams.Set("port", t.portForTrackerResponse)
 	queryParams.Set("uploaded", strconv.Itoa(t.piecesUploaded))
 	queryParams.Set("downloaded", strconv.Itoa(t.piecesDownloaded))
 	queryParams.Set("left", strconv.Itoa(t.numPieces-t.piecesDownloaded))
-	queryParams.Set("event", event)
+	queryParams.Set("event", string(event))
 	queryParams.Set("compact", "1")
 	if t.trackerId != "" {
 		queryParams.Set("trackerid", t.trackerId)
 	}
+
 	reqURL.RawQuery = "info_hash=" + hash.CustomURLEscape(t.infoHash) + "&" + queryParams.Encode()
 
 	req, err := http.NewRequest("GET", reqURL.String(), nil)
@@ -464,7 +536,11 @@ func (t *Torrent) checkPieceHash(p *pieceData) (bool, error) {
 	return string(givenHash) == t.piecesStr[p.num*20:p.num*20+20], nil
 }
 
-var PieceNotOnDiskErr error = errors.New("Piece not wanted or not downloaded yet")
+var (
+	ErrPieceNotOnDisk      = errors.New("Piece not wanted or not downloaded yet")
+	ErrUnsupportedProtocol = errors.New("Peer protocol unsupported")
+	ErrBadInfoHash         = errors.New("Peer handshake contained invalid info hash")
+)
 
 // Makes sure existing data on disk is verified when the user adds a torrent.
 // TODO: Do in parallel?
@@ -474,7 +550,7 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 
 	for p.num = range t.numPieces {
 		err := t.getPieceFromDisk(p)
-		if err == PieceNotOnDiskErr {
+		if err == ErrPieceNotOnDisk {
 			continue
 		} else if err != nil {
 			return existingPieces, err
@@ -522,7 +598,7 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 		}
 
 		if pieceStartIdx >= fileInfo.Size() {
-			return PieceNotOnDiskErr
+			return ErrPieceNotOnDisk
 		}
 		_, err = t.files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
 		return err
@@ -555,7 +631,7 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 
 			if fileInfo.Size() < currFile.finalSize {
 				if pieceOffsetIntoFile >= fileInfo.Size() {
-					return PieceNotOnDiskErr
+					return ErrPieceNotOnDisk
 				}
 			} else {
 				if pieceOffsetIntoFile >= currFile.finalSize {
@@ -721,6 +797,7 @@ func (t *Torrent) savePieceToDisk(p *pieceData) error {
 	return nil
 }
 
+// NOTE: Assumes there is at least one peer returned from the tracker.
 func getRandPeer(peerList []string) string {
 	return peerList[rand.Intn(len(peerList))]
 }
@@ -762,6 +839,11 @@ func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
 	return blocks
 }
 
+/*
+chooseResponse receives parsed messages from the handleConn goroutine for a particular net.Conn and sends back a byte response to be written.
+
+It also calls the filesystem I/O functions for assembling chunks into pieces, then saving pieces to disk one at a time.
+*/
 func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan peerMessage, errs chan<- error, cancel context.CancelFunc) {
 	defer close(outboundMsgs)
 
@@ -907,7 +989,7 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 	havePiece := bitfieldContains(t.bitfield, pieceNum)
 	if !havePiece {
 		outboundMsgs <- createChokeMsg()
-		return PieceNotOnDiskErr
+		return ErrPieceNotOnDisk
 	}
 
 	currPieceSize := t.pieceSize
@@ -928,7 +1010,12 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 	return nil
 }
 
-func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, errs chan<- error, ctx context.Context, cancel context.CancelFunc) {
+/*
+handleConn reads from the connection into a temporary buffer. It then uses a memory arena to piece together fragments of peer messages.
+
+After parsing, structured messages are sent to another goroutine, which constructs a response to be returned to handleConn for writing.
+*/
+func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, conn net.Conn, myPeerId []byte, errs chan<- error) {
 	defer conn.Close()
 
 	parsedMessages := make(chan peerMessage, 10)
@@ -949,13 +1036,12 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, errs chan<- error, 
 	msgBuf := make([]byte, 32*1024)
 	msgBufCursor := 0
 
-	// Include piece message header
+	// Account for 'piece' message header
 	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13
 	tempBuf := make([]byte, MAX_RESPONSE_SIZE)
 
 	// Generally 2 minutes: https://wiki.theory.org/BitTorrentSpecification#keep-alive:_.3Clen.3D0000.3E
-	timeout := 5 * time.Second
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(MESSAGE_TIMEOUT)
 
 	for {
 		select {
@@ -970,7 +1056,7 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, errs chan<- error, 
 				return
 			}
 		case <-timer.C:
-			errs <- errors.New("Waited too long")
+			errs <- errors.New("Message timeout expired")
 			return
 		case <-ctx.Done():
 			return
@@ -991,7 +1077,7 @@ func (t *Torrent) handleConn(conn net.Conn, myPeerId []byte, errs chan<- error, 
 		if !timer.Stop() {
 			<-timer.C
 		}
-		timer.Reset(timeout)
+		timer.Reset(MESSAGE_TIMEOUT)
 
 		// TODO: Use len instead
 		if slices.Max(msgBuf) == 0 {

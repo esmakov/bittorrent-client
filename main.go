@@ -163,7 +163,7 @@ func main() {
 
 		fmt.Println(t)
 
-		if err := t.Start(); err != nil {
+		if err := t.StartConns(); err != nil {
 			fmt.Printf("Torrent '%v' failed to start: %v\n", metaInfoFileName, err)
 			os.Exit(1)
 		}
