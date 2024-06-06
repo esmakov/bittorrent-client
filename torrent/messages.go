@@ -244,10 +244,6 @@ func concatMultipleSlices[T any](slices [][]T) []T {
 	return result
 }
 
-func getPeerId() string {
-	return "edededededededededed"
-}
-
 // TODO: Do we need more than one?
 func getNextFreePort() string {
 	return "6881"

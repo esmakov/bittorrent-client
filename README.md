@@ -24,11 +24,13 @@ go run main <add>|<tree> <path/to/file.torrent>
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
+- Send 'have' messages to all peers when a piece is downloaded
 - Run in background
 - Blacklist misbehaving peers
 - Specify destination directory
-- Specify log level and log destination
 - More subcommands: remove, pause/resume
+- More interesting bitmask visualization
+- Use already-written bencode package to generate .torrent files (instead of pobrn/mktorrent)
 
 ### Optimizations
 - Better piece download strategies (rarest first)

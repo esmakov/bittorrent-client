@@ -102,6 +102,16 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "info":
+		// TODO: Should show running status of torrent, not just default-initialized state
+		t, err := torrent.New(metaInfoFileName, false)
+		fmt.Println(t)
+
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
 	case "tree":
 		// if err := treeCmd.Parse(os.Args[3:]); err != nil {
 		// 	fmt.Println(err)

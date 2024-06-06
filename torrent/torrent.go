@@ -26,12 +26,14 @@ import (
 )
 
 type Torrent struct {
-	metaInfoFileName       string
-	trackerHostname        string
-	comment                string
-	infoHash               []byte
-	isPrivate              bool
-	piecesStr              string
+	metaInfoFileName string
+	trackerHostname  string
+	comment          string
+	infoHash         []byte
+	isPrivate        bool
+	piecesStr        string
+	// Typical piece size for this torrent.
+	// The final piece will almost certainly be smaller, however.
 	pieceSize              int
 	numPieces              int
 	totalSize              int
@@ -49,7 +51,7 @@ type Torrent struct {
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 
 	// for connection limit on a per-torrent basis
-	// numInterested
+	// numInterested int
 	sync.Mutex
 }
 
@@ -103,8 +105,8 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	}
 
 	hasMultipleFiles := false
-	bFiles := bInfo["files"]
-	if bFiles != nil {
+	bFiles, ok := bInfo["files"]
+	if ok {
 		hasMultipleFiles = true
 	}
 
@@ -284,7 +286,8 @@ func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
 }
 
 const (
-	BLOCK_SIZE = 16 * 1024
+	CLIENT_BLOCK_SIZE = 16 * 1024
+
 	/*
 	   "Implementer's Note: Even 30 peers is plenty, the official client version 3
 	   in fact only actively forms new connections if it has less than 30 peers and
@@ -295,16 +298,22 @@ const (
 	   highly unlikely to increase download speed. UI designers are strongly advised
 	   to make this obscure and hard to change as it is very rare to be useful to do so." */
 	EFFECTIVE_MAX_PEER_CONNS = 25
+
 	// TODO: Expose to user
 	USER_DESIRED_PEER_CONNS = 1
-	DIAL_TIMEOUT            = 1 * time.Second
-	CONN_READ_INTERVAL      = 1 * time.Second
-	MESSAGE_TIMEOUT         = 5 * time.Second
-	MY_PEER_ID              = "edededededededededed"
+
+	DIAL_TIMEOUT    = 2 * time.Second
+	MESSAGE_TIMEOUT = 5 * time.Second
+	// Decides how long handleConn waits for incoming messages (from the peer)
+	// before checking for outbound messages (from chooseResponse)
+	// or whether MESSAGE_TIMEOUT has expired
+	CONN_READ_INTERVAL = 100 * time.Millisecond
+
+	CLIENT_PEER_ID = "edededededededededed"
 )
 
 func (t *Torrent) getPeers() ([]string, error) {
-	trackerResponse, err := t.sendTrackerMessage(MY_PEER_ID, startedEvent)
+	trackerResponse, err := t.sendTrackerMessage(startedEvent)
 	if err != nil {
 		return nil, err
 	}
@@ -368,13 +377,7 @@ func (t *Torrent) StartConns() error {
 	}
 
 	maxPeers := min(len(peerList), USER_DESIRED_PEER_CONNS, EFFECTIVE_MAX_PEER_CONNS)
-	// If something goes wrong in handleConn or chooseResponse,
-	// they send to errs before exiting. A suitably large buffer is
-	// probably needed to make sure they don't block on error reporting
-	// before exiting.
-	errs := make(chan error, maxPeers*2)
-
-	// TODO: Send all connected peers a 'have' msg when a piece is downloaded
+	errs := make(chan error, maxPeers)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -388,12 +391,12 @@ func (t *Torrent) StartConns() error {
 			continue
 		}
 
-		go t.handleConn(ctx, cancel, conn, []byte(MY_PEER_ID), errs)
+		go t.handleConn(ctx, cancel, conn, errs)
 		numPeers++
 	}
 
 	numPeersChan := make(chan int, 2)
-	go t.acceptConns(ctx, numPeers, maxPeers, numPeersChan, MY_PEER_ID, errs)
+	go t.acceptConns(ctx, numPeers, maxPeers, numPeersChan, errs)
 
 	for {
 		select {
@@ -402,7 +405,7 @@ func (t *Torrent) StartConns() error {
 		case n := <-numPeersChan:
 			numPeers = n
 		case e := <-errs:
-			if errors.Is(e, ErrBadInfoHash) || errors.Is(e, ErrUnsupportedProtocol) {
+			if errors.Is(e, ErrBadInfoHash) || errors.Is(e, ErrBadPieceHash) || errors.Is(e, ErrUnsupportedProtocol) {
 				// TODO: Add to blacklist
 			}
 			numPeers--
@@ -414,7 +417,7 @@ func (t *Torrent) StartConns() error {
 				log.Println(err)
 				continue
 			}
-			go t.handleConn(ctx, cancel, conn, []byte(MY_PEER_ID), errs)
+			go t.handleConn(ctx, cancel, conn, errs)
 			numPeers++
 			numPeersChan <- numPeers
 		case <-ctx.Done():
@@ -422,7 +425,7 @@ func (t *Torrent) StartConns() error {
 
 			// NOTE: Tracker only expects this once
 			// Make sure this doesn't happen if the download started at 100% already
-			t.sendTrackerMessage(MY_PEER_ID, completedEvent)
+			t.sendTrackerMessage(completedEvent)
 			return nil
 		default:
 			// Multiple successive errors occurred to get here
@@ -432,7 +435,7 @@ func (t *Torrent) StartConns() error {
 					log.Println(err)
 					continue
 				}
-				go t.handleConn(ctx, cancel, conn, []byte(MY_PEER_ID), errs)
+				go t.handleConn(ctx, cancel, conn, errs)
 				numPeers++
 				numPeersChan <- numPeers
 			}
@@ -440,7 +443,7 @@ func (t *Torrent) StartConns() error {
 	}
 }
 
-func (t *Torrent) acceptConns(ctx context.Context, numPeers, maxPeers int, numPeersChan chan int, myPeerId string, errs chan error) {
+func (t *Torrent) acceptConns(ctx context.Context, numPeers, maxPeers int, numPeersChan chan int, errs chan error) {
 	listenAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprint(":", t.portForTrackerResponse))
 	if err != nil {
 		log.Println(err)
@@ -471,19 +474,19 @@ func (t *Torrent) acceptConns(ctx context.Context, numPeers, maxPeers int, numPe
 			}
 			log.Printf("Incoming conn from %v\n", conn.RemoteAddr())
 			newCtx, newCancel := context.WithCancel(ctx)
-			go t.handleConn(newCtx, newCancel, conn, []byte(MY_PEER_ID), errs)
+			go t.handleConn(newCtx, newCancel, conn, errs)
 			numPeers++
 			numPeersChan <- numPeers
 		}
 	}
 }
 
-func (t *Torrent) sendTrackerMessage(peerId string, event trackerEventKinds) (map[string]any, error) {
+func (t *Torrent) sendTrackerMessage(event trackerEventKinds) (map[string]any, error) {
 	reqURL := url.URL{
 		Opaque: t.trackerHostname,
 	}
 	queryParams := url.Values{}
-	queryParams.Set("peer_id", peerId)
+	queryParams.Set("peer_id", CLIENT_PEER_ID)
 	queryParams.Set("port", t.portForTrackerResponse)
 	queryParams.Set("uploaded", strconv.Itoa(t.piecesUploaded))
 	queryParams.Set("downloaded", strconv.Itoa(t.piecesDownloaded))
@@ -545,6 +548,7 @@ var (
 	ErrPieceNotOnDisk      = errors.New("Piece not wanted or not downloaded yet")
 	ErrUnsupportedProtocol = errors.New("Peer protocol unsupported")
 	ErrBadInfoHash         = errors.New("Peer handshake contained invalid info hash")
+	ErrBadPieceHash        = errors.New("Piece failed hash check")
 )
 
 // Makes sure existing data on disk is verified when the user adds a torrent.
@@ -570,7 +574,7 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 
 		if !correct {
 			if !empty {
-				return existingPieces, errors.New(fmt.Sprintf("Piece %v failed hash check\n", p.num))
+				return existingPieces, ErrBadPieceHash
 			}
 			// Piece hasn't been downloaded but some pieces ahead have
 			continue
@@ -698,27 +702,29 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 	return nil
 }
 
-// Reads data from the provided pieceData and saves it, assuming the piece number is initialized
-func (t *Torrent) savePieceToDisk(p *pieceData) error {
-	currPieceSize := t.pieceSize
+// Reads data from the provided pieceData and writes it, assuming the piece number is set correctly
+func (t *Torrent) writePieceToDisk(p *pieceData) error {
+	thisPieceSize := t.pieceSize
 	if p.num == t.numPieces-1 {
-		currPieceSize = t.totalSize - p.num*t.pieceSize
+		thisPieceSize = t.totalSize - p.num*t.pieceSize
 	}
+
+	// All piece indices are relative to the "stream" of pieces and may cross file boundaries
 	pieceStartIdx := int64(p.num * t.pieceSize)
-	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
+	pieceEndIdx := pieceStartIdx + int64(thisPieceSize)
 
 	if len(t.files) == 1 {
-		_, err := t.files[0].fd.WriteAt(p.data[:currPieceSize], pieceStartIdx)
+		_, err := t.files[0].fd.WriteAt(p.data[:thisPieceSize], pieceStartIdx)
 		return err
 	}
 
-	// All indices are relative to the "stream" of pieces and may cross file boundaries
-	fileStartIdx := int64(0)
-	remainingPieceSize := currPieceSize
-	startWriteAt := 0
+	var (
+		fileStartIdx       = int64(0)
+		remainingPieceSize = thisPieceSize
+		startWriteAt       = 0
+	)
 
-	for i := 0; i < len(t.files); i++ {
-		currFile := t.files[i]
+	for _, currFile := range t.files {
 		fileEndIdx := fileStartIdx + currFile.finalSize
 
 		if pieceStartIdx > fileEndIdx {
@@ -745,8 +751,11 @@ func (t *Torrent) savePieceToDisk(p *pieceData) error {
 				}
 			}
 
-			if (pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx) || remainingPieceSize < currPieceSize {
-				if remainingPieceSize < currPieceSize {
+			boundedByFile := pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx
+			crossesFileBoundary := pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx
+
+			if boundedByFile || remainingPieceSize < thisPieceSize {
+				if remainingPieceSize < thisPieceSize {
 					writeSize := min(int(currFile.finalSize), remainingPieceSize)
 					if pieceOffsetIntoFile != 0 {
 						panic("Interesting if this happens, maybe we skipped a piece belonging to a file we didn't want?")
@@ -766,20 +775,18 @@ func (t *Torrent) savePieceToDisk(p *pieceData) error {
 						break
 					}
 
-					if startWriteAt != currPieceSize {
+					if startWriteAt != thisPieceSize {
 						panic("Piece fragments do not add up to a whole piece")
 					}
 
 				} else {
-					if _, err := currFile.fd.WriteAt(p.data[:currPieceSize], pieceOffsetIntoFile); err != nil {
+					if _, err := currFile.fd.WriteAt(p.data[:thisPieceSize], pieceOffsetIntoFile); err != nil {
 						return err
 					}
 				}
 
 				return nil
-			} else if pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx {
-				// Piece crosses file boundary
-
+			} else if crossesFileBoundary {
 				if pieceStartIdx < fileStartIdx {
 					panic("bytesFromEnd will be calculated too high")
 				}
@@ -843,24 +850,21 @@ func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
 }
 
 /*
-chooseResponse receives parsed messages from the handleConn goroutine for a particular net.Conn and sends back a byte response to be written.
+chooseResponse receives parsed messages from the handleConn goroutine for a particular peer connection and sends back a byte response to be written.
 
-It also calls the filesystem I/O functions for assembling chunks into pieces, then saving pieces to disk one at a time.
+It also verifies the piece hash and calls storePieceToDisk if correct.
 */
 func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan peerMessage, errs chan<- error, cancel context.CancelFunc) {
 	defer close(outboundMsgs)
 
-	connState := newConnState()
-
-	bfLen := int(math.Ceil(float64(t.numPieces) / 8.0))
-	peerBitfield := make([]byte, bfLen)
-
-	blockOffset := 0
-	numBlocks := t.pieceSize / BLOCK_SIZE
-	lastBlockOffset := (numBlocks - 1) * BLOCK_SIZE
-	currBlockSize := BLOCK_SIZE
-	currPieceSize := t.pieceSize
-	p := newPieceData(t.pieceSize)
+	var (
+		p             = newPieceData(t.pieceSize)
+		connState     = newConnState()
+		peerBitfield  = make([]byte, int(math.Ceil(float64(t.numPieces)/8.0)))
+		currPieceSize = t.pieceSize
+		currBlockSize = CLIENT_BLOCK_SIZE
+		blockOffset   = 0
+	)
 
 	for {
 		msg, open := <-parsedMsgs
@@ -873,7 +877,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 		case handshake:
 			// fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
 			outboundMsgs <- createBitfieldMsg(t.bitfield)
-			fmt.Printf("Sending bitfield to %v\n", peerAddr)
+			fmt.Printf("INFO: Sending bitfield to %v\n", peerAddr)
 
 			// TODO: Determine if we want to talk to this peer
 			outboundMsgs <- createUnchokeMsg()
@@ -903,34 +907,24 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 
 			// Start wherever for now
 			var err error
-			p.num, err = nextAvailablePieceIdx(rand.Intn(t.numPieces), t.numPieces, peerBitfield, t.bitfield)
+			p.num, err = selectNextPiece(rand.Intn(t.numPieces), t.numPieces, peerBitfield, t.bitfield)
 			if err != nil {
 				errs <- err
 				return
 			}
 
-			reqMsg := createRequestMsg(p.num, blockOffset, BLOCK_SIZE)
+			reqMsg := createRequestMsg(p.num, blockOffset, CLIENT_BLOCK_SIZE)
 			outboundMsgs <- reqMsg
 			fmt.Printf("Requesting piece %v from %v\n", p.num, peerAddr)
 		case piece:
 			p.storeBlockIntoPiece(msg, currBlockSize)
+			blockOffset += CLIENT_BLOCK_SIZE
 
 			if p.num == t.numPieces-1 {
 				currPieceSize = t.totalSize - p.num*t.pieceSize
-				numBlocks = int(math.Ceil(float64(currPieceSize) / BLOCK_SIZE))
-				lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
 			}
 
-			// Incomplete piece
-			if blockOffset < lastBlockOffset {
-				// Account for block just downloaded
-				blockOffset += BLOCK_SIZE
-				remaining := currPieceSize - blockOffset
-				if remaining < BLOCK_SIZE {
-					currBlockSize = remaining
-				}
-				fmt.Println(blockOffset, "/", currPieceSize, "bytes")
-			} else {
+			if blockOffset == currPieceSize {
 				fmt.Printf("Completed piece %v, checking...\n", p.num)
 				correct, err := t.checkPieceHash(p)
 				if err != nil {
@@ -938,13 +932,13 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 					return
 				}
 
-				// TODO: Add peer to blacklist
 				if !correct {
-					errs <- fmt.Errorf("Piece %v from %v failed hash check", p.num, peerAddr)
+					errs <- ErrBadPieceHash
 					return
 				}
 
-				if err = t.savePieceToDisk(p); err != nil {
+				// TODO: Send all connected peers a 'have' msg when a piece is downloaded
+				if err = t.writePieceToDisk(p); err != nil {
 					errs <- err
 					return
 				}
@@ -955,28 +949,31 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 
 				if t.IsComplete() {
 					cancel()
-					// TODO: Anything else? Do peers have to be notified?
 					return
 				}
 
-				// Reset
+				// Reset for next piece
 				currPieceSize = t.pieceSize
-				currBlockSize = BLOCK_SIZE
-				numBlocks = t.pieceSize / BLOCK_SIZE
+				currBlockSize = CLIENT_BLOCK_SIZE
 				blockOffset = 0
-				lastBlockOffset = (numBlocks - 1) * BLOCK_SIZE
-				clear(p.data) // In case we pause in the middle of a piece
 
-				p.num, err = nextAvailablePieceIdx(p.num, t.numPieces, peerBitfield, t.bitfield)
+				p.num, err = selectNextPiece(p.num, t.numPieces, peerBitfield, t.bitfield)
 				if err != nil {
 					errs <- err
 					return
 				}
+			} else {
+				// Incomplete piece
+				remaining := currPieceSize - blockOffset
+				if remaining < CLIENT_BLOCK_SIZE {
+					currBlockSize = remaining
+				}
+				// TODO: Make a progress bar
+				fmt.Println(blockOffset, "/", currPieceSize, "bytes")
 			}
 
 			reqMsg := createRequestMsg(p.num, blockOffset, currBlockSize)
 			outboundMsgs <- reqMsg
-			fmt.Printf("Requesting %v bytes for piece %v from %v\n", currBlockSize, p.num, peerAddr)
 		case have:
 			updateBitfield(peerBitfield, msg.pieceNum)
 		}
@@ -1006,6 +1003,8 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 		offset += blockSize
 	}
 
+	t.storeUploaded(t.piecesUploaded + 1)
+
 	return nil
 }
 
@@ -1014,7 +1013,7 @@ handleConn reads from the connection into a temporary buffer. It then uses a mem
 
 After parsing, structured messages are sent to another goroutine, which constructs a response to be returned to handleConn for writing.
 */
-func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, conn net.Conn, myPeerId []byte, errs chan<- error) {
+func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, conn net.Conn, errs chan<- error) {
 	defer conn.Close()
 
 	parsedMessages := make(chan peerMessage, 10)
@@ -1026,7 +1025,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 
 	log.Println("Connected to peer", peer)
 
-	handshakeMsg := createHandshakeMsg(t.infoHash, []byte(MY_PEER_ID))
+	handshakeMsg := createHandshakeMsg(t.infoHash, []byte(CLIENT_PEER_ID))
 	if _, err := conn.Write(handshakeMsg); err != nil {
 		errs <- err
 		return
@@ -1035,7 +1034,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 	msgBuf := make([]byte, 0, 32*1024)
 
 	// Account for 'piece' message header
-	const MAX_RESPONSE_SIZE = BLOCK_SIZE + 13
+	const MAX_RESPONSE_SIZE = CLIENT_BLOCK_SIZE + 13
 	tempBuf := make([]byte, MAX_RESPONSE_SIZE)
 
 	// Generally 2 minutes: https://wiki.theory.org/BitTorrentSpecification#keep-alive:_.3Clen.3D0000.3E
@@ -1102,6 +1101,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 		}
 
 		clear(msgBuf[:firstFragmentIdx])
+		clear(tempBuf)
 
 		if firstFragmentIdx == len(msgBuf) {
 			// No fragments found
@@ -1114,6 +1114,8 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 	}
 }
 
+// Fulfills BEP 23: Tracker Returns Compact Peer Lists
+// http://bittorrent.org/beps/bep_0023.html
 func extractCompactPeers(s string) ([]string, error) {
 	var list []string
 
@@ -1163,10 +1165,10 @@ func bitfieldContains(bitfield []byte, pieceNum int) bool {
 
 // TODO: Don't select pieces from unwanted files
 // Sequentially chooses the next piece to download, assuming we want all of them
-func nextAvailablePieceIdx(currPieceNum, numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
+func selectNextPiece(currPieceNum, numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
 	nextPieceNum := currPieceNum + 1
 
-	for attempts := 0; attempts < numPieces; attempts++ {
+	for range numPieces {
 		if currPieceNum == numPieces {
 			nextPieceNum = 0
 		}

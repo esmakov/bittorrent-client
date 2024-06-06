@@ -168,7 +168,7 @@ func (p *parser) parseDict() map[string]any {
 }
 
 func (p *parser) parseDictEntry() (k string, v any, e error) {
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		t, err := p.consumeToken()
 		if err != nil {
 			e = err
