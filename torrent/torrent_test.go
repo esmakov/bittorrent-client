@@ -53,6 +53,10 @@ func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
 		return new(Torrent), err
 	}
 
+	for _, file := range torr.Files() {
+		file.Wanted = true
+	}
+
 	return torr, nil
 }
 

@@ -87,7 +87,7 @@ func (m model) View() string {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Printf("USAGE: %v <add>|<tree> <path/to/file.torrent>\n", filepath.Base(os.Args[0]))
+		fmt.Printf("USAGE: %v <add>|<info>|<tree> <path/to/file.torrent>\n", filepath.Base(os.Args[0]))
 		os.Exit(1)
 	}
 

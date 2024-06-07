@@ -139,7 +139,6 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 			files = append(files, &TorrentFile{
 				Path:      filepath.Join(pathSegments...),
 				finalSize: int64(bFileLength),
-				Wanted:    true,
 			})
 		}
 	} else {
@@ -148,7 +147,6 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		files = append(files, &TorrentFile{
 			Path:      f,
 			finalSize: int64(totalSize),
-			Wanted:    true,
 		})
 	}
 

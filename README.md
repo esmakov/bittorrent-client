@@ -4,11 +4,12 @@ The [mktorrent](github.com/pobrn/mktorrent/) package is required to build test c
 
 # Usage
 ```console
-go run main <add>|<tree> <path/to/file.torrent>
+go run main <add>|<info>|<tree> <path/to/file.torrent>
 ```
 
-- Two commands are supported:
+- The following commands are supported:
   - add: Add a new torrent and start downloading.
+  - info: Display information about the torrent (total size, # of files, etc.)
   - tree: Display the torrent file structure.
 - <path/to/file.torrent> is the required path to a .torrent file.
 
