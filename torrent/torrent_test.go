@@ -9,6 +9,8 @@ import (
 	"testing"
 )
 
+const BLOCK_SIZE = 16 * 1024
+
 /*
 Creates random size files and makes the metainfo file from them,
 thereby returning a completed Torrent.
@@ -114,7 +116,7 @@ func TestSavePieceToDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := torr.savePieceToDisk(p); err != nil {
+	if err := torr.writePieceToDisk(p); err != nil {
 		t.Fatal(err)
 	}
 
@@ -255,7 +257,7 @@ func TestNextAvailablePieceIdx(t *testing.T) {
 		torr.bitfield[i] &= 0x00
 	}
 
-	num, err := nextAvailablePieceIdx(p.num, torr.numPieces, peerBitfield, torr.bitfield)
+	num, err := selectNextPiece(p.num, torr.numPieces, peerBitfield, torr.bitfield)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +302,7 @@ func BenchmarkNextAvailablePieceIdx(t *testing.B) {
 	}
 
 	for i := 0; i < t.N; i++ {
-		n1, err1 := nextAvailablePieceIdx(p.num, torr.numPieces, peerBitfield, torr.bitfield)
+		n1, err1 := selectNextPiece(p.num, torr.numPieces, peerBitfield, torr.bitfield)
 		if err1 != nil {
 			t.Fatal(err1)
 		}
