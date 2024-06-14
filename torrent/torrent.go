@@ -40,6 +40,7 @@ type Torrent struct {
 	piecesDownloaded       int
 	piecesUploaded         int
 	bitfield               []byte
+	wantedBitfield         []byte
 	files                  []*TorrentFile
 	lastChecked            time.Time
 	dir                    string
@@ -88,7 +89,6 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	numPieces := len(bPieces) / 20
 
 	bitfieldLen := int(math.Ceil(float64(numPieces) / 8))
-	bitfield := make([]byte, bitfieldLen)
 
 	// Optional common fields
 	var (
@@ -160,11 +160,14 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		pieceSize:              bPieceLength,
 		numPieces:              numPieces,
 		totalSize:              totalSize,
-		bitfield:               bitfield,
+		bitfield:               make([]byte, bitfieldLen),
+		wantedBitfield:         make([]byte, bitfieldLen),
 		files:                  files,
 		dir:                    dir,
 		portForTrackerResponse: getNextFreePort(),
 	}
+
+	t.SetWantedBitfield()
 
 	return t, nil
 }
@@ -238,19 +241,63 @@ func (t *Torrent) Files() []*TorrentFile {
 	return t.files
 }
 
+// Returns a slice where the index corresponds to the piece number, and the value is true if the piece is wanted.
+func (t *Torrent) getWantedPieceNums() []bool {
+	// pieces are 0-indexed
+	wantedPieces := make([]bool, t.numPieces+1)
+
+	filePtr := int64(0)
+	for _, file := range t.Files() {
+		filePtr += file.finalSize
+		if !file.Wanted {
+			continue
+		}
+		/*
+			                     filePtr=85            filePtr = 140
+			NNNNNNNNNNNNNNNNNNNNNN|YYYYYYYYYYYYYYYYYYYY|NNNNNNNNNNNNNNNNNN
+			unwanted piece  | piece 3 | piece 4 | piece 5 |
+			                75          100         125
+		*/
+
+		firstWantedPieceIdx := (filePtr / int64(t.pieceSize)) * int64(t.pieceSize)
+		firstWantedPieceNum := firstWantedPieceIdx / int64(t.pieceSize)
+
+		fileEndPtr := filePtr + file.finalSize
+		lastWantedPieceIdx := (fileEndPtr / int64(t.pieceSize)) * int64(t.pieceSize)
+		lastWantedPieceNum := lastWantedPieceIdx / int64(t.pieceSize)
+
+		for num := firstWantedPieceNum; num <= lastWantedPieceNum; num++ {
+			wantedPieces[num] = true
+		}
+	}
+	return wantedPieces
+}
+
+// Populates a bitfield representing the pieces the user wants.
+func (t *Torrent) SetWantedBitfield() {
+	for i, bool := range t.getWantedPieceNums() {
+		if bool {
+			updateBitfield(t.wantedBitfield, i)
+		}
+	}
+}
+
 /*
 Opens the TorrentFiles for writing and returns the ones that have been modified since the torrent was last checked.
 
-TODO: Since a new torrent instance is created and destroyed each run,
-the lastChecked field doesn't persist and we aren't able to save time by not
-checking files.
+FIXME: Since a new torrent instance is created and destroyed each run, the
+lastChecked field doesn't persist and we aren't able to save time by not
+checking files. As a result, all the TorrentFiles are returned.
+
 NOTE: Prior to calling this, torrentFiles have a nil file descriptior.
 */
 func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
 	var filesToCheck []*TorrentFile
+
 	if t.dir != "" {
 		os.Mkdir(t.dir, 0o766)
 	}
+
 	for _, file := range t.files {
 		if !file.Wanted {
 			continue
@@ -272,6 +319,7 @@ func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
 		}
 
 		file.fd = fd
+
 		info, err := os.Stat(file.fd.Name())
 		if err != nil {
 			return nil, err
@@ -312,7 +360,7 @@ const (
 	CLIENT_PEER_ID = "edededededededededed"
 )
 
-func (t *Torrent) getPeers() ([]string, error) {
+func (t *Torrent) GetPeers() ([]string, error) {
 	trackerResponse, err := t.sendTrackerMessage(startedEvent)
 	if err != nil {
 		return nil, err
@@ -366,12 +414,7 @@ StartConns sends the "started" message to the tracker and then runs for the life
 
 StartConns will attempt to net.Dial as many connections as desired by the user, as long as there are enough peers in the swarm. It also kicks off a separate goroutine that listens for incoming connections.
 */
-func (t *Torrent) StartConns() error {
-	peerList, err := t.getPeers()
-	if err != nil {
-		return err
-	}
-
+func (t *Torrent) StartConns(peerList []string) error {
 	if len(peerList) == 0 {
 		// TODO: Keep polling tracker for peers in a separate goroutine
 	}
@@ -549,6 +592,7 @@ var (
 	ErrUnsupportedProtocol = errors.New("Peer protocol unsupported")
 	ErrBadInfoHash         = errors.New("Peer handshake contained invalid info hash")
 	ErrBadPieceHash        = errors.New("Piece failed hash check")
+	ErrNoUsefulPieces      = errors.New("Peer has no pieces we want")
 )
 
 // Makes sure existing data on disk is verified when the user adds a torrent.
@@ -558,7 +602,7 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 	var existingPieces []int
 
 	for p.num = range t.numPieces {
-		err := t.getPieceFromDisk(p)
+		err := t.readPieceFromDisk(p)
 		if err == ErrPieceNotOnDisk {
 			continue
 		} else if err != nil {
@@ -581,7 +625,7 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 		}
 
 		// NOTE: Piece could be empty and still correct at this point, if intentionally so
-		updateBitfield(t.bitfield, p.num)
+		t.updateBitfield(p.num)
 		t.piecesDownloaded++
 		existingPieces = append(existingPieces, p.num)
 		clear(p.data)
@@ -591,12 +635,138 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 	return existingPieces, nil
 }
 
-// Writes into the provided pieceData, assuming the piece number is initialized and in a file we want
-func (t *Torrent) getPieceFromDisk(p *pieceData) error {
+type FileIOOperation func(f *os.File, b []byte, off int64) (n int, err error)
+
+var (
+	writeOp FileIOOperation = (*os.File).WriteAt
+	readOp  FileIOOperation = (*os.File).ReadAt
+)
+
+func (t *Torrent) readOrWritePiece(op FileIOOperation, p *pieceData) error {
 	currPieceSize := t.pieceSize
 	if p.num == t.numPieces-1 {
 		currPieceSize = t.totalSize - p.num*t.pieceSize
 	}
+
+	// All indices are relative to the "stream" of pieces and may cross file boundaries
+	pieceStartIdx := int64(p.num * t.pieceSize)
+	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
+
+	if len(t.files) == 1 {
+		fileInfo, err := os.Stat(t.files[0].Path)
+		if err != nil {
+			return err
+		}
+
+		if &op == &readOp {
+			if pieceStartIdx >= fileInfo.Size() {
+				return ErrPieceNotOnDisk
+			}
+		}
+		_, err = op(t.files[0].fd, p.data[:currPieceSize], pieceStartIdx)
+		return err
+	}
+
+	var (
+		fileStartIdx       = int64(0)
+		remainingPieceSize = currPieceSize
+		startOpAt          = 0
+	)
+
+	for _, currFile := range t.files {
+		if &op == &readOp {
+			if !currFile.Wanted {
+				continue
+			}
+		}
+		fileEndIdx := fileStartIdx + currFile.finalSize
+
+		if pieceStartIdx > fileEndIdx {
+			fileStartIdx += currFile.finalSize
+			continue
+		}
+
+		fileInfo, err := os.Stat(currFile.Path)
+		if err != nil {
+			return err
+		}
+
+		for {
+			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
+			bytesFromEOF := fileEndIdx - pieceStartIdx
+
+			if fileInfo.Size() < currFile.finalSize {
+				if pieceOffsetIntoFile >= fileInfo.Size() {
+					return ErrPieceNotOnDisk
+				}
+			} else {
+				if pieceOffsetIntoFile >= currFile.finalSize {
+					panic("Unreachable")
+				}
+			}
+
+			boundedByFile := pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx
+			crossesFileBoundary := pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx
+			if boundedByFile || remainingPieceSize < currPieceSize {
+				if remainingPieceSize < currPieceSize {
+					opSize := min(int(currFile.finalSize), remainingPieceSize)
+					if _, err := op(currFile.fd, p.data[startOpAt:startOpAt+opSize], 0); err != nil {
+						return err
+					}
+					remainingPieceSize -= opSize
+					startOpAt += opSize
+					if remainingPieceSize < 0 {
+						panic("Unreachable: remainingPieceSize < 0")
+					}
+
+					if remainingPieceSize > 0 {
+						// Move on to yet another (at least a third) file to finish this piece
+						fileStartIdx += currFile.finalSize
+						break
+					}
+
+					if startOpAt != currPieceSize {
+						panic("Unreachable: Piece fragments do not add up to a whole piece")
+					}
+
+				} else {
+					if _, err := op(currFile.fd, p.data[:currPieceSize], pieceOffsetIntoFile); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			} else if crossesFileBoundary {
+				if pieceStartIdx < fileStartIdx {
+					panic("bytesFromEnd will be calculated too high")
+				}
+
+				// TODO: Shouldn't have to subslice as long as the caller initializes the pieceData with correct size
+				if _, err := op(currFile.fd, p.data[:bytesFromEOF], pieceOffsetIntoFile); err != nil {
+					return err
+				}
+
+				remainingPieceSize -= int(bytesFromEOF)
+				startOpAt += int(bytesFromEOF)
+				fileStartIdx += currFile.finalSize
+				break
+			} else {
+				panic("Unreachable")
+			}
+		}
+	}
+
+	return nil
+}
+
+// Writes retrieved data into the provided pieceData, assuming the piece number is initialized and in a file we want
+func (t *Torrent) readPieceFromDisk(p *pieceData) error {
+	currPieceSize := t.pieceSize
+	if p.num == t.numPieces-1 {
+		currPieceSize = t.totalSize - p.num*t.pieceSize
+	}
+
+	// All indices are relative to the "stream" of pieces and may cross file boundaries
 	pieceStartIdx := int64(p.num * t.pieceSize)
 	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
@@ -613,10 +783,11 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 		return err
 	}
 
-	// All indices are relative to the "stream" of pieces and may cross file boundaries
-	fileStartIdx := int64(0)
-	remainingPieceSize := currPieceSize
-	startReadAt := 0
+	var (
+		fileStartIdx       = int64(0)
+		remainingPieceSize = currPieceSize
+		startReadAt        = 0
+	)
 
 	for _, currFile := range t.files {
 		if !currFile.Wanted {
@@ -648,7 +819,10 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 				}
 			}
 
-			if (pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx) || remainingPieceSize < currPieceSize {
+			boundedByFile := pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx
+			crossesFileBoundary := pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx
+
+			if boundedByFile || remainingPieceSize < currPieceSize {
 				if remainingPieceSize < currPieceSize {
 					readSize := min(int(currFile.finalSize), remainingPieceSize)
 					if _, err := currFile.fd.ReadAt(p.data[startReadAt:startReadAt+readSize], 0); err != nil {
@@ -677,9 +851,7 @@ func (t *Torrent) getPieceFromDisk(p *pieceData) error {
 				}
 
 				return nil
-			} else if pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx {
-				// Piece crosses file boundary
-
+			} else if crossesFileBoundary {
 				if pieceStartIdx < fileStartIdx {
 					panic("bytesFromEnd will be calculated too high")
 				}
@@ -819,8 +991,8 @@ type pieceData struct {
 	data []byte
 }
 
-func newPieceData(pieceLen int) *pieceData {
-	data := make([]byte, pieceLen)
+func newPieceData(pieceSize int) *pieceData {
+	data := make([]byte, pieceSize)
 	return &pieceData{data: data}
 }
 
@@ -907,13 +1079,13 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 
 			// Start wherever for now
 			var err error
-			p.num, err = selectNextPiece(rand.Intn(t.numPieces), t.numPieces, peerBitfield, t.bitfield)
+			p.num, err = t.selectNextPiece(rand.Intn(t.numPieces), peerBitfield)
 			if err != nil {
 				errs <- err
 				return
 			}
 
-			reqMsg := createRequestMsg(p.num, blockOffset, CLIENT_BLOCK_SIZE)
+			reqMsg := createRequestMsg(uint32(p.num), uint32(blockOffset), CLIENT_BLOCK_SIZE)
 			outboundMsgs <- reqMsg
 			fmt.Printf("Requesting piece %v from %v\n", p.num, peerAddr)
 		case piece:
@@ -944,7 +1116,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				}
 
 				t.storeDownloaded(t.piecesDownloaded + 1)
-				updateBitfield(t.bitfield, msg.pieceNum)
+				t.updateBitfield(msg.pieceNum)
 				fmt.Printf("%b\n", t.bitfield)
 
 				if t.IsComplete() {
@@ -957,7 +1129,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				currBlockSize = CLIENT_BLOCK_SIZE
 				blockOffset = 0
 
-				p.num, err = selectNextPiece(p.num, t.numPieces, peerBitfield, t.bitfield)
+				p.num, err = t.selectNextPiece(p.num, peerBitfield)
 				if err != nil {
 					errs <- err
 					return
@@ -972,7 +1144,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				fmt.Println(blockOffset, "/", currPieceSize, "bytes")
 			}
 
-			reqMsg := createRequestMsg(p.num, blockOffset, currBlockSize)
+			reqMsg := createRequestMsg(uint32(p.num), uint32(blockOffset), uint32(currBlockSize))
 			outboundMsgs <- reqMsg
 		case have:
 			updateBitfield(peerBitfield, msg.pieceNum)
@@ -994,12 +1166,12 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 	}
 
 	p := newPieceData(currPieceSize)
-	t.getPieceFromDisk(p)
+	t.readPieceFromDisk(p)
 	blocks := p.splitIntoBlocks(t, blockSize)
 
 	offset := 0
 	for _, block := range blocks {
-		outboundMsgs <- createPieceMsg(pieceNum, offset, block)
+		outboundMsgs <- createPieceMsg(uint32(pieceNum), uint32(offset), block)
 		offset += blockSize
 	}
 
@@ -1100,9 +1272,6 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 			}
 		}
 
-		clear(msgBuf[:firstFragmentIdx])
-		clear(tempBuf)
-
 		if firstFragmentIdx == len(msgBuf) {
 			// No fragments found
 			msgBuf = msgBuf[:0]
@@ -1148,7 +1317,12 @@ func extractCompactPeers(s string) ([]string, error) {
 	return list, nil
 }
 
-// TODO: Implement a version that operates on a Torrent so it can be locked for thread safety
+func (t *Torrent) updateBitfield(pieceNum int) {
+	t.Lock()
+	defer t.Unlock()
+	updateBitfield(t.bitfield, pieceNum)
+}
+
 func updateBitfield(bitfield []byte, pieceNum int) {
 	b := &bitfield[pieceNum/8]
 	bitsFromRight := 7 - (pieceNum % 8)
@@ -1163,24 +1337,25 @@ func bitfieldContains(bitfield []byte, pieceNum int) bool {
 	return b&mask != 0
 }
 
-// TODO: Don't select pieces from unwanted files
-// Sequentially chooses the next piece to download, assuming we want all of them
-func selectNextPiece(currPieceNum, numPieces int, peerBitfield, ourBitfield []byte) (int, error) {
+// Sequentially chooses the next piece to download, based on which ones
+// the peer has, the one we have, and the files the user wants
+func (t *Torrent) selectNextPiece(currPieceNum int, peerBitfield []byte) (int, error) {
 	nextPieceNum := currPieceNum + 1
 
-	for range numPieces {
-		if currPieceNum == numPieces {
+	for range t.numPieces {
+		if currPieceNum == t.numPieces {
 			nextPieceNum = 0
 		}
 
 		if bitfieldContains(peerBitfield, nextPieceNum) &&
-			!bitfieldContains(ourBitfield, nextPieceNum) {
+			bitfieldContains(t.wantedBitfield, nextPieceNum) &&
+			!bitfieldContains(t.bitfield, nextPieceNum) {
 			return nextPieceNum, nil
 		}
 		nextPieceNum++
 	}
 
-	return 0, errors.New("Peer has no pieces we want")
+	return 0, ErrNoUsefulPieces
 }
 
 type connState struct {

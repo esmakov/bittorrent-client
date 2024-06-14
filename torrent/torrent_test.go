@@ -1,6 +1,7 @@
 package torrent
 
 import (
+	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -9,31 +10,36 @@ import (
 	"testing"
 )
 
-const BLOCK_SIZE = 16 * 1024
-
 /*
-Creates random size files and makes the metainfo file from them,
-thereby returning a completed Torrent.
+Creates numFiles of fileSize bytes (all set to Wanted=true) in a new directory
+and generates a metainfo file from them, thereby returning a completed Torrent.
+The file descriptors are uninitialized until calling the OpenOrCreateFiles method.
+
+The file contents are initialized to 1 at the byte level to distinguish them from empty files.
+(i.e. we don't get correct=true when checking a piece that hasn't been completed)
+
+Deleting the test directory and corresponding metainfo file is the caller's responsibility.
 
 NOTE: Requires having github.com/pobrn/mktorrent/ in your PATH
 */
-func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
+func createTorrentWithTestData(numFiles, fileSize int) (*Torrent, error) {
 	testDir, err := os.MkdirTemp(".", "torrent_test_")
 	if err != nil {
 		return new(Torrent), err
 	}
 
-	for i := 0; i < numFiles; i++ {
+	for range numFiles {
 		file, err := os.CreateTemp(testDir, "test_file_")
 		if err != nil {
 			return new(Torrent), err
 		}
-		b := make([]byte, maxFileSize)
-		// So it's distinguishable from an empty file,
-		// e.g. we don't get correct=true when checking a piece that hasn't been completed
-		for i := 0; i < len(b); i++ {
+
+		b := make([]byte, fileSize)
+
+		for i := range len(b) {
 			b[i] = 1
 		}
+
 		_, err = file.Write(b)
 		if err != nil {
 			return new(Torrent), err
@@ -45,8 +51,7 @@ func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
 		return new(Torrent), err
 	}
 
-	_, f := filepath.Split(testDir)
-	metaInfoFileName := f + ".torrent"
+	metaInfoFileName := filepath.Base(testDir) + ".torrent"
 
 	torr, err := New(metaInfoFileName, false)
 	if err != nil {
@@ -56,6 +61,10 @@ func createTorrentWithTestData(numFiles, maxFileSize int) (*Torrent, error) {
 	for _, file := range torr.Files() {
 		file.Wanted = true
 	}
+
+	// Has to be called again because we needed to programmatically
+	// set the files as wanted above _after_ calling New
+	torr.SetWantedBitfield()
 
 	return torr, nil
 }
@@ -111,7 +120,8 @@ func TestSavePieceToDisk(t *testing.T) {
 	p := newPieceData(currPieceSize)
 	p.num = pieceNum
 
-	for i := 0; i < len(p.data); i++ {
+	// Needs to have the same contents the files were generated with
+	for i := range len(p.data) {
 		p.data[i] = 1
 	}
 
@@ -162,7 +172,8 @@ func TestGetPieceFromDisk(t *testing.T) {
 	}
 	p := newPieceData(currPieceSize)
 	p.num = pieceNum
-	err = torr.getPieceFromDisk(p)
+
+	err = torr.readPieceFromDisk(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,14 +216,14 @@ func TestSplitIntoBlocks(t *testing.T) {
 	}
 	p := newPieceData(currPieceSize)
 	p.num = pieceNum
-	err = torr.getPieceFromDisk(p)
+
+	err = torr.readPieceFromDisk(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	blocks := p.splitIntoBlocks(torr, BLOCK_SIZE)
-	remadePiece := concatMultipleSlices(blocks)
-	p.data = remadePiece
+	blocks := p.splitIntoBlocks(torr, CLIENT_BLOCK_SIZE)
+	p.data = concatMultipleSlices(blocks)
 	correct, err := torr.checkPieceHash(p)
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +242,7 @@ func TestSplitIntoBlocks(t *testing.T) {
 	}
 }
 
-func TestNextAvailablePieceIdx(t *testing.T) {
+func TestSelectNextPiece(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		3,
 		rand.Intn(32*1024))
@@ -244,24 +255,29 @@ func TestNextAvailablePieceIdx(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pieceNum := rand.Intn(torr.numPieces)
-	p := newPieceData(torr.numPieces)
-	p.num = pieceNum
+	p := newPieceData(torr.pieceSize)
+	p.num = rand.Intn(torr.numPieces)
 
-	var expectedNum int
-	if p.num == torr.numPieces {
-		expectedNum = 0
-	} else {
-		expectedNum = p.num + 1
+	expectedPieceNum := p.num + 1
+	if p.num == torr.numPieces-1 {
+		expectedPieceNum = 0
 	}
+
+	fmt.Printf("torr.numPieces: %v\n", torr.numPieces)
+	fmt.Printf("p.num: %v\n", p.num)
+	fmt.Printf("expectedPieceNum: %v\n", expectedPieceNum)
 
 	peerBitfield := make([]byte, len(torr.bitfield))
 	for i := range len(peerBitfield) {
+		// Our pretend peer has all the pieces
 		peerBitfield[i] |= 0xFF
 		torr.bitfield[i] &= 0x00
 	}
+	fmt.Printf("peerBitfield: %b\n", peerBitfield)
+	fmt.Printf("torr.bitfield: %b\n", torr.bitfield)
+	fmt.Printf("torr.wantedBitfield: %b\n", torr.wantedBitfield)
 
-	num, err := selectNextPiece(p.num, torr.numPieces, peerBitfield, torr.bitfield)
+	num, err := torr.selectNextPiece(p.num, peerBitfield)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,59 +286,32 @@ func TestNextAvailablePieceIdx(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if num != expectedNum {
-		t.Fatalf("Expected %v, got %v\n", expectedNum, num)
+	if num != expectedPieceNum {
+		t.Fatalf("Expected %v, got %v\n", expectedPieceNum, num)
 	}
 }
 
-func BenchmarkNextAvailablePieceIdx(t *testing.B) {
+func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		3,
-		32*1024)
+		2^18) // Each file contains exactly 1 piece
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// We should want all the pieces now
-	if err := os.RemoveAll(torr.dir); err != nil {
+	_, err = torr.OpenOrCreateFiles()
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	pieceNum := rand.Intn(torr.numPieces)
-	p := newPieceData(torr.numPieces)
-	p.num = pieceNum
+	torr.Files()[1].Wanted = false
+	expectedWantedPieces := []bool{true, false, true}
 
-	var expectedNum int
-	if p.num == torr.numPieces {
-		expectedNum = 0
-	} else {
-		expectedNum = p.num + 1
-	}
-
-	peerBitfield := make([]byte, len(torr.bitfield))
-	for i := range len(peerBitfield) {
-		peerBitfield[i] |= 0xFF
-		torr.bitfield[i] &= 0x00
-	}
-
-	for i := 0; i < t.N; i++ {
-		n1, err1 := selectNextPiece(p.num, torr.numPieces, peerBitfield, torr.bitfield)
-		if err1 != nil {
-			t.Fatal(err1)
+	actualWantedPieceNums := torr.getWantedPieceNums()
+	for i, bool := range actualWantedPieceNums {
+		if expectedWantedPieces[i] != bool {
+			t.Fatalf("Expected to want pieces %v, actually wanted pieces %v\n", expectedWantedPieces, actualWantedPieceNums)
 		}
-		if n1 != expectedNum {
-			t.Fatalf("Expected %v, got %v\n", expectedNum, n1)
-		}
-		// n2, err2 := nextAvailablePieceIdx2(p.num, torr.numPieces, peerBitfield, torr.bitfield)
-		// if err2 != nil {
-		// 	t.Fatal(err2)
-		// }
-		// if n2 != expectedNum {
-		// 	t.Fatalf("Expected %v, got %v\n", expectedNum, n2)
-		// }
-	}
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
-		t.Fatal(err)
 	}
 }
 

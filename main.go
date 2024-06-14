@@ -154,6 +154,8 @@ func main() {
 			os.Exit(0)
 		}
 
+		t.SetWantedBitfield()
+
 		filesToCheck, err := t.OpenOrCreateFiles()
 		if err != nil {
 			panic(err)
@@ -166,14 +168,20 @@ func main() {
 		}
 
 		if t.IsComplete() {
-			fmt.Println(metaInfoFileName, "is complete, starting to seed...")
+			fmt.Println(metaInfoFileName, "is COMPLETE, starting to seed...")
 			// TODO: Start seeding
 			return
 		}
 
 		fmt.Println(t)
 
-		if err := t.StartConns(); err != nil {
+		peerList, err := t.GetPeers()
+		if err != nil {
+			fmt.Println("Error:", err)
+			return
+		}
+
+		if err := t.StartConns(peerList); err != nil {
 			fmt.Printf("Torrent '%v' failed to start: %v\n", metaInfoFileName, err)
 			os.Exit(1)
 		}

@@ -191,7 +191,7 @@ func createBitfieldMsg(bitfield []byte) []byte {
 }
 
 // <len=0013><id=6><index><begin><length>
-func createRequestMsg(pieceNum, offset, length int) []byte {
+func createRequestMsg(pieceNum, offset, length uint32) []byte {
 	lengthAndID := []byte{
 		0x00,
 		0x00,
@@ -202,7 +202,7 @@ func createRequestMsg(pieceNum, offset, length int) []byte {
 	bytes := make([]byte, 4+13)
 	copy(bytes, lengthAndID)
 
-	payload := []uint32{uint32(pieceNum), uint32(offset), uint32(length)}
+	payload := []uint32{pieceNum, offset, length}
 	for i, v := range payload {
 		idx := 5 + i*4
 		binary.BigEndian.PutUint32(bytes[idx:idx+4], v)
@@ -212,17 +212,34 @@ func createRequestMsg(pieceNum, offset, length int) []byte {
 }
 
 // <len=0009+X><id=7><index><begin><block>
-func createPieceMsg(pieceNum, offset int, block []byte) []byte {
+func createPieceMsg(pieceNum, offset uint32, block []byte) []byte {
 	lengthBytes := make([]byte, 4)
-	length := 9 + len(block)
-	binary.BigEndian.PutUint32(lengthBytes, uint32(length))
+	length := uint32(9 + len(block))
+	binary.BigEndian.PutUint32(lengthBytes, length)
 
 	pieceNumBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(pieceNumBytes, uint32(pieceNum))
+	binary.BigEndian.PutUint32(pieceNumBytes, pieceNum)
 
 	offsetBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(offsetBytes, uint32(offset))
+	binary.BigEndian.PutUint32(offsetBytes, offset)
 	return concatMultipleSlices([][]byte{lengthBytes, {0x07}, pieceNumBytes, offsetBytes, block})
+}
+
+// have: <len=0005><id=4><piece index>
+// "The have message is fixed length. The payload is the zero-based index of a piece that has just been successfully downloaded and verified via the hash."
+func createHaveMsg(pieceNum uint32) []byte {
+	lengthAndID := []byte{
+		0x00,
+		0x00,
+		0x00,
+		0x05, // length without prefix = 5
+		0x04, // message ID
+	}
+	bytes := make([]byte, 4+5)
+	copy(bytes, lengthAndID)
+	binary.BigEndian.AppendUint32(bytes, pieceNum)
+
+	return bytes
 }
 
 // Credit: https://freshman.tech/snippets/go/concatenate-slices/#concatenating-multiple-slices-at-once
