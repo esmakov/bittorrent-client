@@ -223,7 +223,7 @@ func TestSplitIntoBlocks(t *testing.T) {
 	}
 
 	blocks := p.splitIntoBlocks(torr, CLIENT_BLOCK_SIZE)
-	p.data = concatMultipleSlices(blocks)
+	p.data = messages.ConcatMultipleSlices(blocks)
 	correct, err := torr.checkPieceHash(p)
 	if err != nil {
 		t.Fatal(err)

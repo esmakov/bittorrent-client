@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/esmakov/bittorrent-client/hash"
+	"github.com/esmakov/bittorrent-client/messages"
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
@@ -448,7 +449,7 @@ func (t *Torrent) StartConns(peerList []string) error {
 		case n := <-numPeersChan:
 			numPeers = n
 		case e := <-errs:
-			if errors.Is(e, ErrBadInfoHash) || errors.Is(e, ErrBadPieceHash) || errors.Is(e, ErrUnsupportedProtocol) {
+			if errors.Is(e, messages.ErrBadInfoHash) || errors.Is(e, ErrBadPieceHash) || errors.Is(e, messages.ErrUnsupportedProtocol) {
 				// TODO: Add to blacklist
 			}
 			numPeers--
@@ -588,11 +589,9 @@ func (t *Torrent) checkPieceHash(p *pieceData) (bool, error) {
 }
 
 var (
-	ErrPieceNotOnDisk      = errors.New("Piece not wanted or not downloaded yet")
-	ErrUnsupportedProtocol = errors.New("Peer protocol unsupported")
-	ErrBadInfoHash         = errors.New("Peer handshake contained invalid info hash")
-	ErrBadPieceHash        = errors.New("Piece failed hash check")
-	ErrNoUsefulPieces      = errors.New("Peer has no pieces we want")
+	ErrPieceNotOnDisk = errors.New("Piece not wanted or not downloaded yet")
+	ErrBadPieceHash   = errors.New("Piece failed hash check")
+	ErrNoUsefulPieces = errors.New("Peer has no pieces we want")
 )
 
 // Makes sure existing data on disk is verified when the user adds a torrent.
@@ -996,10 +995,10 @@ func newPieceData(pieceSize int) *pieceData {
 	return &pieceData{data: data}
 }
 
-func (p *pieceData) storeBlockIntoPiece(msg peerMessage, blockSize int) {
-	block := p.data[msg.blockOffset : msg.blockOffset+blockSize]
+func (p *pieceData) storeBlockIntoPiece(msg messages.PeerMessage, blockSize int) {
+	block := p.data[msg.BlockOffset : msg.BlockOffset+blockSize]
 	// TODO: Don't copy each block twice
-	copy(block, msg.blockData)
+	copy(block, msg.BlockData)
 }
 
 func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
@@ -1022,11 +1021,11 @@ func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
 }
 
 /*
-chooseResponse receives parsed messages from the handleConn goroutine for a particular peer connection and sends back a byte response to be written.
+chooseResponse runs for the lifetime of a connection, receiving parsed messages from the handleConn goroutine for a particular peer connection. It sends back a byte response on outboundMsgs to be written.
 
-It also verifies the piece hash and calls storePieceToDisk if correct.
+It also verifies the piece hash and calls writePieceToDisk if correct.
 */
-func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan peerMessage, errs chan<- error, cancel context.CancelFunc) {
+func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan messages.PeerMessage, errs chan<- error, cancel context.CancelFunc) {
 	defer close(outboundMsgs)
 
 	var (
@@ -1045,36 +1044,36 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 			return
 		}
 
-		switch msg.kind {
-		case handshake:
+		switch msg.Kind {
+		case messages.Handshake:
 			// fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
-			outboundMsgs <- createBitfieldMsg(t.bitfield)
+			outboundMsgs <- messages.CreateBitfieldMsg(t.bitfield)
 			fmt.Printf("INFO: Sending bitfield to %v\n", peerAddr)
 
 			// TODO: Determine if we want to talk to this peer
-			outboundMsgs <- createUnchokeMsg()
-		case request:
-			err := t.handlePieceRequest(msg.pieceNum, msg.blockSize, outboundMsgs)
+			outboundMsgs <- messages.CreateUnchokeMsg()
+		case messages.Request:
+			err := t.handlePieceRequest(msg.PieceNum, msg.BlockSize, outboundMsgs)
 			if err != nil {
 				// Drop connection?
 				log.Println("Error retrieving piece:", err)
 			}
-		case keepalive:
-		case choke:
+		case messages.Keepalive:
+		case messages.Choke:
 			connState.peer_choking = true
-		case unchoke:
+		case messages.Unchoke:
 			connState.peer_choking = false
-		case interested:
+		case messages.Interested:
 			connState.peer_interested = true
-		case uninterested:
+		case messages.Uninterested:
 			connState.peer_interested = false
-		case bitfield:
+		case messages.Bitfield:
 			// if connState.peer_choking {
 			// 	continue
 			// }
-			peerBitfield = msg.bitfield
+			peerBitfield = msg.Bitfield
 
-			outboundMsgs <- createInterestedMsg()
+			outboundMsgs <- messages.CreateInterestedMsg()
 			fmt.Printf("Sending interested, request to %v\n", peerAddr)
 
 			// Start wherever for now
@@ -1085,10 +1084,10 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				return
 			}
 
-			reqMsg := createRequestMsg(uint32(p.num), uint32(blockOffset), CLIENT_BLOCK_SIZE)
+			reqMsg := messages.CreateRequestMsg(uint32(p.num), uint32(blockOffset), CLIENT_BLOCK_SIZE)
 			outboundMsgs <- reqMsg
 			fmt.Printf("Requesting piece %v from %v\n", p.num, peerAddr)
-		case piece:
+		case messages.Piece:
 			p.storeBlockIntoPiece(msg, currBlockSize)
 			blockOffset += CLIENT_BLOCK_SIZE
 
@@ -1144,10 +1143,10 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				fmt.Println(blockOffset, "/", currPieceSize, "bytes")
 			}
 
-			reqMsg := createRequestMsg(uint32(p.num), uint32(blockOffset), uint32(currBlockSize))
+			reqMsg := messages.CreateRequestMsg(uint32(p.num), uint32(blockOffset), uint32(currBlockSize))
 			outboundMsgs <- reqMsg
-		case have:
-			updateBitfield(peerBitfield, msg.pieceNum)
+		case messages.Have:
+			setBitfield(peerBitfield, msg.PieceNum)
 		}
 	}
 }
@@ -1156,7 +1155,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs chan<- []byte) error {
 	havePiece := bitfieldContains(t.bitfield, pieceNum)
 	if !havePiece {
-		outboundMsgs <- createChokeMsg()
+		outboundMsgs <- messages.CreateChokeMsg()
 		return ErrPieceNotOnDisk
 	}
 
@@ -1171,7 +1170,7 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 
 	offset := 0
 	for _, block := range blocks {
-		outboundMsgs <- createPieceMsg(uint32(pieceNum), uint32(offset), block)
+		outboundMsgs <- messages.CreatePieceMsg(uint32(pieceNum), uint32(offset), block)
 		offset += blockSize
 	}
 
@@ -1188,7 +1187,7 @@ After parsing, structured messages are sent to another goroutine, which construc
 func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, conn net.Conn, errs chan<- error) {
 	defer conn.Close()
 
-	parsedMessages := make(chan peerMessage, 10)
+	parsedMessages := make(chan messages.PeerMessage, 10)
 	defer close(parsedMessages)
 	outboundMsgs := make(chan []byte, 10)
 
@@ -1197,7 +1196,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 
 	log.Println("Connected to peer", peer)
 
-	handshakeMsg := createHandshakeMsg(t.infoHash, []byte(CLIENT_PEER_ID))
+	handshakeMsg := messages.CreateHandshakeMsg(t.infoHash, []byte(CLIENT_PEER_ID))
 	if _, err := conn.Write(handshakeMsg); err != nil {
 		errs <- err
 		return
@@ -1254,7 +1253,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 
 		// Passing a slice of msgBuf to the parser would create msg structs that get cleared too
 		copyToParse := slices.Clone(msgBuf)
-		msgList, err := parseMultiMessage(copyToParse, t.infoHash)
+		msgList, err := messages.ParseMultiMessage(copyToParse, t.infoHash)
 		if err != nil {
 			errs <- err
 			return
@@ -1263,12 +1262,12 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 		firstFragmentIdx := 0
 		for _, msg := range msgList {
 			parsedMessages <- msg
-			if msg.kind != fragment {
-				fmt.Printf("INFO: %v sent a %v\n", conn.RemoteAddr(), msg.kind)
+			if msg.Kind != messages.Fragment {
+				fmt.Printf("INFO: %v sent a %v\n", conn.RemoteAddr(), msg.Kind)
 			}
 
-			if msg.kind != fragment {
-				firstFragmentIdx += msg.totalSize
+			if msg.Kind != messages.Fragment {
+				firstFragmentIdx += msg.TotalSize
 			}
 		}
 
@@ -1372,4 +1371,9 @@ func newConnState() *connState {
 		true,
 		false,
 	}
+}
+
+// TODO: Do we need more than one?
+func getNextFreePort() string {
+	return "6881"
 }
