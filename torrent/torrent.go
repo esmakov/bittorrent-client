@@ -64,7 +64,7 @@ type TorrentFile struct {
 	Wanted    bool
 }
 
-// Initializes the Torrent state with nil file descriptors and no notion of which files are wanted.
+// Initializes the Torrent state with nil file descriptors and no notion of which files are wanted (user input has not been read yet)
 func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	fileBytes, err := os.ReadFile(metaInfoFileName)
 	if err != nil {
@@ -1213,8 +1213,8 @@ func bitfieldContains(bitfield []byte, pieceNum int) bool {
 	return b&mask != 0
 }
 
-// Sequentially chooses the next piece to download, based on which ones
-// the peer has, the one we have, and the files the user wants
+// Sequentially chooses the next piece to be downloaded, skipping those we already have,
+// the peer doesn't have, or those entirely in a file the user doesn't want
 func (t *Torrent) selectNextPiece(currPieceNum int, peerBitfield []byte) (int, error) {
 	nextPieceNum := currPieceNum + 1
 
