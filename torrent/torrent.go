@@ -244,12 +244,12 @@ func (t *Torrent) Files() []*TorrentFile {
 
 // Returns a slice where the index corresponds to the piece number, and the value is true if the piece is wanted.
 func (t *Torrent) getWantedPieceNums() []bool {
-	// pieces are 0-indexed
-	wantedPieces := make([]bool, t.numPieces+1)
+	wantedPieces := make([]bool, t.numPieces)
 
-	filePtr := int64(0)
+	fileEndPtr := int64(0)
 	for _, file := range t.Files() {
-		filePtr += file.finalSize
+		fileEndPtr += file.finalSize
+
 		if !file.Wanted {
 			continue
 		}
@@ -260,10 +260,11 @@ func (t *Torrent) getWantedPieceNums() []bool {
 			                75          100         125
 		*/
 
-		firstWantedPieceIdx := (filePtr / int64(t.pieceSize)) * int64(t.pieceSize)
+		fileStartPtr := fileEndPtr - file.finalSize
+
+		firstWantedPieceIdx := (fileStartPtr / int64(t.pieceSize)) * int64(t.pieceSize)
 		firstWantedPieceNum := firstWantedPieceIdx / int64(t.pieceSize)
 
-		fileEndPtr := filePtr + file.finalSize
 		lastWantedPieceIdx := (fileEndPtr / int64(t.pieceSize)) * int64(t.pieceSize)
 		lastWantedPieceNum := lastWantedPieceIdx / int64(t.pieceSize)
 

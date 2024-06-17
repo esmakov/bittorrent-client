@@ -263,19 +263,12 @@ func TestSelectNextPiece(t *testing.T) {
 		expectedPieceNum = 0
 	}
 
-	fmt.Printf("torr.numPieces: %v\n", torr.numPieces)
-	fmt.Printf("p.num: %v\n", p.num)
-	fmt.Printf("expectedPieceNum: %v\n", expectedPieceNum)
-
 	peerBitfield := make([]byte, len(torr.bitfield))
 	for i := range len(peerBitfield) {
 		// Our pretend peer has all the pieces
 		peerBitfield[i] |= 0xFF
 		torr.bitfield[i] &= 0x00
 	}
-	fmt.Printf("peerBitfield: %b\n", peerBitfield)
-	fmt.Printf("torr.bitfield: %b\n", torr.bitfield)
-	fmt.Printf("torr.wantedBitfield: %b\n", torr.wantedBitfield)
 
 	num, err := torr.selectNextPiece(p.num, peerBitfield)
 	if err != nil {
