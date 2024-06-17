@@ -278,7 +278,7 @@ func (t *Torrent) getWantedPieceNums() []bool {
 func (t *Torrent) SetWantedBitfield() {
 	for i, bool := range t.getWantedPieceNums() {
 		if bool {
-			updateBitfield(t.wantedBitfield, i)
+			setBitfield(t.wantedBitfield, i)
 		}
 	}
 }
@@ -624,7 +624,7 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 		}
 
 		// NOTE: Piece could be empty and still correct at this point, if intentionally so
-		t.updateBitfield(p.num)
+		t.safeSetBitfield(p.num)
 		t.piecesDownloaded++
 		existingPieces = append(existingPieces, p.num)
 		clear(p.data)
@@ -751,23 +751,23 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 
 // Reads data from the provided pieceData and writes it, assuming the piece number is set correctly
 func (t *Torrent) writePieceToDisk(p *pieceData) error {
-	thisPieceSize := t.pieceSize
+	currPieceSize := t.pieceSize
 	if p.num == t.numPieces-1 {
-		thisPieceSize = t.totalSize - p.num*t.pieceSize
+		currPieceSize = t.totalSize - p.num*t.pieceSize
 	}
 
 	// All piece indices are relative to the "stream" of pieces and may cross file boundaries
 	pieceStartIdx := int64(p.num * t.pieceSize)
-	pieceEndIdx := pieceStartIdx + int64(thisPieceSize)
+	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
 	if len(t.files) == 1 {
-		_, err := t.files[0].fd.WriteAt(p.data[:thisPieceSize], pieceStartIdx)
+		_, err := t.files[0].fd.WriteAt(p.data[:currPieceSize], pieceStartIdx)
 		return err
 	}
 
 	var (
 		fileStartIdx       = int64(0)
-		remainingPieceSize = thisPieceSize
+		remainingPieceSize = currPieceSize
 		startWriteAt       = 0
 	)
 
@@ -801,8 +801,8 @@ func (t *Torrent) writePieceToDisk(p *pieceData) error {
 			boundedByFile := pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx
 			crossesFileBoundary := pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx
 
-			if boundedByFile || remainingPieceSize < thisPieceSize {
-				if remainingPieceSize < thisPieceSize {
+			if boundedByFile || remainingPieceSize < currPieceSize {
+				if remainingPieceSize < currPieceSize {
 					writeSize := min(int(currFile.finalSize), remainingPieceSize)
 					if pieceOffsetIntoFile != 0 {
 						panic("Interesting if this happens, maybe we skipped a piece belonging to a file we didn't want?")
@@ -822,12 +822,12 @@ func (t *Torrent) writePieceToDisk(p *pieceData) error {
 						break
 					}
 
-					if startWriteAt != thisPieceSize {
+					if startWriteAt != currPieceSize {
 						panic("Piece fragments do not add up to a whole piece")
 					}
 
 				} else {
-					if _, err := currFile.fd.WriteAt(p.data[:thisPieceSize], pieceOffsetIntoFile); err != nil {
+					if _, err := currFile.fd.WriteAt(p.data[:currPieceSize], pieceOffsetIntoFile); err != nil {
 						return err
 					}
 				}
@@ -991,7 +991,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				}
 
 				t.storeDownloaded(t.piecesDownloaded + 1)
-				t.updateBitfield(msg.pieceNum)
+				t.safeSetBitfield(msg.PieceNum)
 				fmt.Printf("%b\n", t.bitfield)
 
 				if t.IsComplete() {
@@ -1081,8 +1081,8 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 	msgBuf := make([]byte, 0, 32*1024)
 
 	// Account for 'piece' message header
-	const MAX_RESPONSE_SIZE = CLIENT_BLOCK_SIZE + 13
-	tempBuf := make([]byte, MAX_RESPONSE_SIZE)
+	const MAX_MESSAGE_SIZE = CLIENT_BLOCK_SIZE + 13
+	tempBuf := make([]byte, MAX_MESSAGE_SIZE)
 
 	// Generally 2 minutes: https://wiki.theory.org/BitTorrentSpecification#keep-alive:_.3Clen.3D0000.3E
 	timer := time.NewTimer(MESSAGE_TIMEOUT)
@@ -1192,13 +1192,13 @@ func extractCompactPeers(s string) ([]string, error) {
 	return list, nil
 }
 
-func (t *Torrent) updateBitfield(pieceNum int) {
+func (t *Torrent) safeSetBitfield(pieceNum int) {
 	t.Lock()
 	defer t.Unlock()
-	updateBitfield(t.bitfield, pieceNum)
+	setBitfield(t.bitfield, pieceNum)
 }
 
-func updateBitfield(bitfield []byte, pieceNum int) {
+func setBitfield(bitfield []byte, pieceNum int) {
 	b := &bitfield[pieceNum/8]
 	bitsFromRight := 7 - (pieceNum % 8)
 	mask := uint8(0x01) << bitsFromRight
