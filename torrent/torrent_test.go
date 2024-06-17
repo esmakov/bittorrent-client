@@ -1,14 +1,34 @@
 package torrent
 
 import (
-	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/esmakov/bittorrent-client/messages"
 )
+
+func TestSetBitfield(t *testing.T) {
+	b := make([]byte, 1)
+	setBitfield(b, 3)
+	expected := 0b00010000
+	if b[0] != byte(expected) {
+		t.Fatalf("Expected: %b, got: %v\n", expected, b[0])
+	}
+}
+
+func TestClearBitfield(t *testing.T) {
+	b := make([]byte, 1)
+	b[0] = 0xFF
+	clearBitfield(b, 3)
+	expected := 0b11101111
+	if b[0] != byte(expected) {
+		t.Fatalf("Expected: %b, got: %v\n", expected, b[0])
+	}
+}
 
 /*
 Creates numFiles of fileSize bytes (all set to Wanted=true) in a new directory

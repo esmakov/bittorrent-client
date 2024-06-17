@@ -1204,6 +1204,23 @@ func setBitfield(bitfield []byte, pieceNum int) {
 	*b |= mask
 }
 
+func clearBitfield(bitfield []byte, pieceNum int) {
+	b := &bitfield[pieceNum/8]
+
+	l := [8]int{
+		0b01111111,
+		0b10111111,
+		0b11011111,
+		0b11101111,
+		0b11110111,
+		0b11111011,
+		0b11111101,
+		0b11111110,
+	}
+
+	*b &= byte(l[pieceNum%8])
+}
+
 func bitfieldContains(bitfield []byte, pieceNum int) bool {
 	b := bitfield[pieceNum/8]
 	bitsFromRight := 7 - (pieceNum % 8)
