@@ -168,8 +168,6 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		portForTrackerResponse: getNextFreePort(),
 	}
 
-	t.SetWantedBitfield()
-
 	return t, nil
 }
 
@@ -1219,7 +1217,7 @@ func (t *Torrent) selectNextPiece(currPieceNum int, peerBitfield []byte) (int, e
 	nextPieceNum := currPieceNum + 1
 
 	for range t.numPieces {
-		if currPieceNum == t.numPieces {
+		if currPieceNum == t.numPieces-1 {
 			nextPieceNum = 0
 		}
 
