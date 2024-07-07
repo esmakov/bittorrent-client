@@ -10,9 +10,10 @@ import (
 )
 
 type model struct {
-	choices  []string
-	cursor   int
-	selected map[int]struct{}
+	choices     []string
+	cursor      int
+	selected    map[int]struct{}
+	selectedAll bool
 }
 
 func initialModel(choices []string) model {
@@ -35,13 +36,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			os.Exit(0)
 
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+			m.cursor--
+			if m.cursor < 0 {
+				m.cursor = len(m.choices)
 			}
 
 		case "down", "j":
-			if m.cursor < len(m.choices)-1 {
-				m.cursor++
+			m.cursor++
+			if m.cursor == len(m.choices) {
+				m.cursor = 0
 			}
 
 		case " ":
@@ -50,6 +53,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.selected, m.cursor)
 			} else {
 				m.selected[m.cursor] = struct{}{}
+			}
+		case "A", "a":
+			if m.selectedAll {
+				for choice := range m.choices {
+					delete(m.selected, choice)
+				}
+				m.selectedAll = false
+			} else {
+				for choice := range m.choices {
+					m.selected[choice] = struct{}{}
+				}
+				m.selectedAll = true
 			}
 
 		case "enter":
@@ -63,7 +78,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	s := "What files do you want to download?\n\n"
+	s := "What files do you want to download?\nPress A to toggle all/none.\n\n"
 
 	for i, choice := range m.choices {
 		cursor := " "
@@ -87,17 +102,17 @@ func (m model) View() string {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Printf("USAGE: %v <add>|<info>|<tree> <path/to/file.torrent>\n", filepath.Base(os.Args[0]))
+		fmt.Printf("USAGE: %v <add>|<info>|<parse> <path/to/file.torrent>\n", filepath.Base(os.Args[0]))
 		os.Exit(1)
 	}
 
 	// addCmd := flag.NewFlagSet("add", flag.ExitOnError)
-	// treeCmd := flag.NewFlagSet("tree", flag.ExitOnError)
+	// parseCmd := flag.NewFlagSet("parse", flag.ExitOnError)
 
 	metaInfoFileName := os.Args[2]
 
 	if filepath.Ext(metaInfoFileName) != ".torrent" {
-		fmt.Println(metaInfoFileName, "is not of type .torrent")
+		fmt.Println(metaInfoFileName, "is not a .torrent file.")
 		os.Exit(1)
 	}
 
@@ -112,8 +127,8 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "tree":
-		// if err := treeCmd.Parse(os.Args[3:]); err != nil {
+	case "parse":
+		// if err := parseCmd.Parse(os.Args[3:]); err != nil {
 		// 	fmt.Println(err)
 		// 	os.Exit(1)
 		// }
