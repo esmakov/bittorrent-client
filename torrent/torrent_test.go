@@ -125,7 +125,7 @@ func TestCheckAllPiecesFuzzed(t *testing.T) {
 	}
 
 	if !torr.IsComplete() {
-		t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", torr.piecesDownloaded, torr.numPieces, torr.bitfield)
+		t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", torr.numDownloaded, torr.numPieces, torr.bitfield)
 	}
 
 	if err := os.RemoveAll(torr.dir); err != nil {
