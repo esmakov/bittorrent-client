@@ -716,12 +716,9 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 	)
 
 	for _, currFile := range t.files {
-		if !currFile.Wanted {
-			continue
-		}
 		fileEndIdx := fileStartIdx + currFile.finalSize
 
-		if pieceStartIdx > fileEndIdx {
+		if !currFile.Wanted || pieceStartIdx >= fileEndIdx {
 			fileStartIdx += currFile.finalSize
 			continue
 		}
@@ -825,7 +822,7 @@ func (t *Torrent) writePieceToDisk(p *pieceData) error {
 	for _, currFile := range t.files {
 		fileEndIdx := fileStartIdx + currFile.finalSize
 
-		if pieceStartIdx > fileEndIdx {
+		if pieceStartIdx >= fileEndIdx {
 			fileStartIdx += currFile.finalSize
 			continue
 		}
