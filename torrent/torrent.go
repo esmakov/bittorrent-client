@@ -241,12 +241,12 @@ func (t *Torrent) Files() []*TorrentFile {
 }
 
 // Returns a slice where the index corresponds to the piece number, and the value is true if the piece is wanted.
-func (t *Torrent) getWantedPieceNums() []bool {
+func (t *Torrent) getWantedPieces() []bool {
 	wantedPieces := make([]bool, t.numPieces)
 
-	fileEndPtr := int64(0)
+	fileEndIdx := int64(0)
 	for _, file := range t.Files() {
-		fileEndPtr += file.finalSize
+		fileEndIdx += file.finalSize
 
 		if !file.Wanted {
 			continue
@@ -255,16 +255,19 @@ func (t *Torrent) getWantedPieceNums() []bool {
 			                     filePtr=85            filePtr = 140
 			NNNNNNNNNNNNNNNNNNNNNN|YYYYYYYYYYYYYYYYYYYY|NNNNNNNNNNNNNNNNNN
 			unwanted piece  | piece 3 | piece 4 | piece 5 |
-			                75          100         125
+			                75        100       125
 		*/
 
-		fileStartPtr := fileEndPtr - file.finalSize
+		fileStartIdx := fileEndIdx - file.finalSize
 
-		firstWantedPieceIdx := (fileStartPtr / int64(t.pieceSize)) * int64(t.pieceSize)
+		firstWantedPieceIdx := (fileStartIdx / int64(t.pieceSize)) * int64(t.pieceSize)
 		firstWantedPieceNum := firstWantedPieceIdx / int64(t.pieceSize)
 
-		lastWantedPieceIdx := (fileEndPtr / int64(t.pieceSize)) * int64(t.pieceSize)
+		lastWantedPieceIdx := ((fileEndIdx - 1) / int64(t.pieceSize)) * int64(t.pieceSize)
 		lastWantedPieceNum := lastWantedPieceIdx / int64(t.pieceSize)
+		// if lastWantedPieceNum == int64(t.numPieces) {
+		// 	lastWantedPieceNum = int64(t.numPieces) - 1
+		// }
 
 		for num := firstWantedPieceNum; num <= lastWantedPieceNum; num++ {
 			wantedPieces[num] = true
@@ -274,8 +277,9 @@ func (t *Torrent) getWantedPieceNums() []bool {
 }
 
 // Populates a bitfield representing the pieces the user wants.
+// Doesn't need to acquire a lock because it only runs on initialization (i.e. we don't support user changing desired pieces mid-download)
 func (t *Torrent) SetWantedBitfield() {
-	for i, bool := range t.getWantedPieceNums() {
+	for i, bool := range t.getWantedPieces() {
 		if bool {
 			setBitfield(t.wantedBitfield, i)
 		}
