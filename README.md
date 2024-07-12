@@ -31,6 +31,7 @@ go run main <add>|<info>|<parse> <path/to/file.torrent>
 - More subcommands: remove, pause/resume
 - More interesting bitmask visualization
 - Use already-written bencode package to generate .torrent files (instead of pobrn/mktorrent)
+- Set log level (debug, info, errors)
 
 ### Optimizations
 - Better piece download strategies (rarest first)

@@ -10,6 +10,7 @@ import (
 var (
 	ErrUnsupportedProtocol = errors.New("Peer protocol unsupported")
 	ErrBadInfoHash         = errors.New("Peer handshake contained invalid info hash")
+	ErrMessageTimedOut     = errors.New("Message timeout expired")
 )
 
 type messageKinds int

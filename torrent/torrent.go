@@ -338,7 +338,11 @@ func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
 	var filesToCheck []*TorrentFile
 
 	if t.dir != "" {
-		os.Mkdir(t.dir, 0o766)
+		if err := os.Mkdir(t.dir, 0o766); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				return nil, err
+			}
+		}
 	}
 
 	for _, file := range t.files {
@@ -432,7 +436,10 @@ func (t *Torrent) GetPeers() ([]string, error) {
 		t.storeLeechers(numLeechers.(int))
 	}
 
-	peersStr := trackerResponse["peers"].(string)
+	peersStr, ok := trackerResponse["peers"].(string)
+	if !ok {
+		return nil, errors.New("No peers for this torrent")
+	}
 	return extractCompactPeers(peersStr)
 }
 
@@ -1008,8 +1015,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				return
 			}
 
-			reqMsg := messages.CreateRequestMsg(uint32(p.num), uint32(blockOffset), CLIENT_BLOCK_SIZE)
-			outboundMsgs <- reqMsg
+			outboundMsgs <- messages.CreateRequestMsg(uint32(p.num), uint32(blockOffset), CLIENT_BLOCK_SIZE)
 			fmt.Printf("Requesting piece %v from %v\n", p.num, peerAddr)
 		case messages.Piece:
 			p.storeBlockIntoPiece(msg, currBlockSize)
@@ -1038,7 +1044,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 					return
 				}
 
-				t.storeDownloaded(t.piecesDownloaded + 1)
+				t.storeDownloaded(t.numDownloaded + 1)
 				t.safeSetBitfield(msg.PieceNum)
 				fmt.Printf("%b\n", t.bitfield)
 
@@ -1149,7 +1155,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 				return
 			}
 		case <-timer.C:
-			errs <- errors.New("Message timeout expired")
+			errs <- messages.ErrMessageTimedOut
 			return
 		case <-ctx.Done():
 			return
