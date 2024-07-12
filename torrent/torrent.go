@@ -163,6 +163,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		totalSize:              totalSize,
 		bitfield:               make([]byte, bitfieldLen),
 		wantedBitfield:         make([]byte, bitfieldLen),
+		activeConns:            make(map[string]net.Conn),
 		files:                  files,
 		dir:                    dir,
 		portForTrackerResponse: getNextFreePort(),
@@ -395,7 +396,7 @@ const (
 	EFFECTIVE_MAX_PEER_CONNS = 25
 
 	// TODO: Expose to user
-	USER_DESIRED_PEER_CONNS = 1
+	USER_DESIRED_PEER_CONNS = 2
 
 	DIAL_TIMEOUT = 2 * time.Second
 
@@ -492,6 +493,7 @@ func (t *Torrent) StartConns(peerList []string) error {
 
 		go t.handleConn(ctx, cancel, conn, errs)
 		numPeers++
+		t.activeConns[conn.RemoteAddr().String()] = conn
 	}
 
 	numPeersChan := make(chan int, 2)
@@ -519,6 +521,7 @@ func (t *Torrent) StartConns(peerList []string) error {
 			go t.handleConn(ctx, cancel, conn, errs)
 			numPeers++
 			numPeersChan <- numPeers
+			t.activeConns[conn.RemoteAddr().String()] = conn
 		case <-ctx.Done():
 			fmt.Println("COMPLETED", t.metaInfoFileName)
 
@@ -578,6 +581,7 @@ func (t *Torrent) acceptConns(ctx context.Context, numPeers, maxPeers int, numPe
 			go t.handleConn(newCtx, newCancel, conn, errs)
 			numPeers++
 			numPeersChan <- numPeers
+			t.activeConns[conn.RemoteAddr().String()] = conn
 		}
 	}
 }
@@ -758,6 +762,7 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 					if _, err := currFile.fd.ReadAt(p.data[startReadAt:startReadAt+readSize], 0); err != nil {
 						return err
 					}
+
 					remainingPieceSize -= readSize
 					startReadAt += readSize
 					if remainingPieceSize < 0 {
@@ -958,6 +963,7 @@ It also verifies the piece hash and calls writePieceToDisk if correct.
 */
 func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan messages.PeerMessage, errs chan<- error, cancel context.CancelFunc) {
 	defer close(outboundMsgs)
+	defer delete(t.activeConns, peerAddr)
 
 	var (
 		p             = newPieceData(t.pieceSize)
@@ -1048,6 +1054,8 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				t.safeSetBitfield(msg.PieceNum)
 				fmt.Printf("%b\n", t.bitfield)
 
+				t.notifyPeers(uint32(p.num), peerAddr)
+
 				if t.IsComplete() {
 					cancel()
 					return
@@ -1077,6 +1085,18 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 		case messages.Have:
 			setBitfield(peerBitfield, msg.PieceNum)
 		}
+	}
+}
+
+func (t *Torrent) notifyPeers(pieceNum uint32, except string) {
+	for _, conn := range t.activeConns {
+		if conn.RemoteAddr().String() == except {
+			continue
+		}
+		go func() {
+			conn.Write(messages.CreateHaveMsg(pieceNum))
+			log.Printf("DEBUG: Telling %v we HAVE piece %v\n", conn.RemoteAddr(), pieceNum)
+		}()
 	}
 }
 
@@ -1116,13 +1136,15 @@ That buffer's contents are copied into a linear allocator to piece together frag
 Messages are parsed and sent to chooseResponse, which sends back a byte stream through outboundMsgs to be written to the conn.
 */
 func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, conn net.Conn, errs chan<- error) {
+	peer := conn.RemoteAddr().String()
+
 	defer conn.Close()
+	defer delete(t.activeConns, peer)
 
 	parsedMessages := make(chan messages.PeerMessage, 10)
 	defer close(parsedMessages)
 	outboundMsgs := make(chan []byte, 10)
 
-	peer := conn.RemoteAddr().String()
 	go t.chooseResponse(peer, outboundMsgs, parsedMessages, errs, cancel)
 
 	log.Println("Connected to peer", peer)
