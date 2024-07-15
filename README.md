@@ -25,7 +25,6 @@ go run main <add>|<info>|<parse> <path/to/file.torrent>
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
-- Send 'have' messages to all peers when a piece is downloaded
 - Blacklist misbehaving peers
 - Specify download directory
 - More subcommands: remove, pause/resume

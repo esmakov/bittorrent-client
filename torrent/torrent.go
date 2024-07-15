@@ -163,7 +163,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		totalSize:              totalSize,
 		bitfield:               make([]byte, bitfieldLen),
 		wantedBitfield:         make([]byte, bitfieldLen),
-		activeConns:            make(map[string]net.Conn),
+		activeConns:            map[string]net.Conn{},
 		files:                  files,
 		dir:                    dir,
 		portForTrackerResponse: getNextFreePort(),
@@ -482,46 +482,17 @@ func (t *Torrent) StartConns(peerList []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	numPeers := 0
-	for numPeers < maxPeers {
-		// TODO: Choose more intelligently
-		conn, err := net.DialTimeout("tcp", getRandPeer(peerList), DIAL_TIMEOUT)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-
-		go t.handleConn(ctx, cancel, conn, errs)
-		numPeers++
-		t.activeConns[conn.RemoteAddr().String()] = conn
-	}
-
-	numPeersChan := make(chan int, 2)
-	go t.acceptConns(ctx, numPeers, maxPeers, numPeersChan, errs)
+	go t.acceptConns(ctx, maxPeers, errs)
 
 	for {
 		select {
 		// NOTE: Make sure errors are only sent when goroutines exit
 		// so we don't go over EFFECTIVE_MAX_PEER_CONNS
-		case n := <-numPeersChan:
-			numPeers = n
 		case e := <-errs:
 			if errors.Is(e, messages.ErrBadInfoHash) || errors.Is(e, ErrBadPieceHash) || errors.Is(e, messages.ErrUnsupportedProtocol) {
 				// TODO: Add to blacklist
 			}
-			numPeers--
-			numPeersChan <- numPeers
 			log.Println("Conn dropped:", e)
-
-			conn, err := net.DialTimeout("tcp", getRandPeer(peerList), DIAL_TIMEOUT)
-			if err != nil {
-				log.Println(err)
-				continue
-			}
-			go t.handleConn(ctx, cancel, conn, errs)
-			numPeers++
-			numPeersChan <- numPeers
-			t.activeConns[conn.RemoteAddr().String()] = conn
 		case <-ctx.Done():
 			fmt.Println("COMPLETED", t.metaInfoFileName)
 
@@ -530,24 +501,31 @@ func (t *Torrent) StartConns(peerList []string) error {
 			t.sendTrackerMessage(completedEvent)
 			return nil
 		default:
-			// Multiple successive errors occurred to get here
-			if numPeers < maxPeers {
-				conn, err := net.DialTimeout("tcp", getRandPeer(peerList), DIAL_TIMEOUT)
-				if err != nil {
-					log.Println(err)
-					continue
-				}
-				go t.handleConn(ctx, cancel, conn, errs)
-				numPeers++
-				numPeersChan <- numPeers
+			// Try to make more connections
+			t.Lock()
+
+			if len(t.activeConns) >= maxPeers {
+				t.Unlock()
+				continue
 			}
+
+			conn, err := net.DialTimeout("tcp", getRandPeer(peerList), DIAL_TIMEOUT)
+			if err != nil {
+				log.Println(err)
+				t.Unlock()
+				continue
+			}
+
+			t.activeConns[conn.RemoteAddr().String()] = conn
+			go t.handleConn(ctx, cancel, conn, errs)
+			t.Unlock()
 		}
 	}
 }
 
 // While listening to incoming connections, acceptConns also uses numPeersChan to notify the
 // StartConns goroutine when one has been accepted, so it can control the total number.
-func (t *Torrent) acceptConns(ctx context.Context, numPeers, maxPeers int, numPeersChan chan int, errs chan error) {
+func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error) {
 	listenAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprint(":", t.portForTrackerResponse))
 	if err != nil {
 		log.Println(err)
@@ -563,25 +541,38 @@ func (t *Torrent) acceptConns(ctx context.Context, numPeers, maxPeers int, numPe
 
 	for {
 		select {
-		case n := <-numPeersChan:
-			numPeers = n
 		case <-ctx.Done():
-			log.Println("No longer accepting conns")
+			log.Println("INFO: Torrent complete, no longer accepting conns")
 			return
 		default:
-		}
-		if numPeers < maxPeers {
-			conn, err := listener.AcceptTCP()
-			if err != nil {
-				log.Println("Accept:", err)
+			t.Lock()
+
+			if len(t.activeConns) >= maxPeers {
+				t.Unlock()
 				continue
 			}
+
+			if err := listener.SetDeadline(time.Now().Add(CONN_READ_INTERVAL)); err != nil {
+				errs <- err
+				return
+			}
+
+			conn, err := listener.AcceptTCP()
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Unlock()
+				continue
+			} else if err != nil {
+				log.Println("Accept:", err)
+				t.Unlock()
+				continue
+			}
+
 			log.Printf("DEBUG: Incoming conn from %v\n", conn.RemoteAddr())
+			t.activeConns[conn.RemoteAddr().String()] = conn
+
 			newCtx, newCancel := context.WithCancel(ctx)
 			go t.handleConn(newCtx, newCancel, conn, errs)
-			numPeers++
-			numPeersChan <- numPeers
-			t.activeConns[conn.RemoteAddr().String()] = conn
+			t.Unlock()
 		}
 	}
 }
