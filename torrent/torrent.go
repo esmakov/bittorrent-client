@@ -988,13 +988,14 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 			// fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
 			outboundMsgs <- messages.CreateBitfieldMsg(t.bitfield)
 			fmt.Printf("DEBUG: Sending bitfield to %v\n", peerAddr)
-
-			// TODO: Determine if we want to talk to this peer
-			outboundMsgs <- messages.CreateUnchokeMsg()
 		case messages.Request:
+			if connState.am_choking {
+				continue
+			}
+
 			err := t.handlePieceRequest(msg.PieceNum, msg.BlockSize, outboundMsgs)
 			if err != nil {
-				// Drop connection?
+				// TODO: Decide whether to drop conn
 				log.Println("Error retrieving piece:", err)
 			}
 		case messages.Keepalive:
@@ -1012,17 +1013,22 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 			// }
 			peerBitfield = msg.Bitfield
 
-			outboundMsgs <- messages.CreateInterestedMsg()
-			fmt.Printf("Sending interested, request to %v\n", peerAddr)
-
 			// Start wherever for now
 			var err error
 			p.num, err = t.selectNextPiece(rand.Intn(t.numPieces), peerBitfield)
-			if err != nil {
+			if err != nil || errors.Is(err, ErrNoUsefulPieces) {
+				// This peer is useless
 				errs <- err
 				return
 			}
 
+			connState.am_choking = false
+			outboundMsgs <- messages.CreateUnchokeMsg()
+
+			outboundMsgs <- messages.CreateInterestedMsg()
+			fmt.Printf("Sending INTERESTED to %v\n", peerAddr)
+
+			// Request the initial piece
 			outboundMsgs <- messages.CreateRequestMsg(uint32(p.num), uint32(blockOffset), CLIENT_BLOCK_SIZE)
 			fmt.Printf("Requesting piece %v from %v\n", p.num, peerAddr)
 		case messages.Piece:
@@ -1083,6 +1089,11 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				fmt.Println(blockOffset, "/", currPieceSize, "bytes")
 			}
 
+			// Check if we should request another piece
+			if connState.peer_choking {
+				continue
+			}
+
 			outboundMsgs <- messages.CreateRequestMsg(uint32(p.num), uint32(blockOffset), uint32(currBlockSize))
 		case messages.Have:
 			setBitfield(peerBitfield, msg.PieceNum)
@@ -1095,6 +1106,7 @@ func (t *Torrent) notifyPeers(pieceNum uint32, except string) {
 		if conn.RemoteAddr().String() == except {
 			continue
 		}
+
 		go func() {
 			conn.Write(messages.CreateHaveMsg(pieceNum))
 			log.Printf("DEBUG: Telling %v we HAVE piece %v\n", conn.RemoteAddr(), pieceNum)
