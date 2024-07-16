@@ -27,17 +27,20 @@ import (
 )
 
 type Torrent struct {
-	metaInfoFileName       string
-	trackerHostname        string
-	comment                string
-	infoHash               []byte
-	isPrivate              bool
-	piecesStr              string
-	totalSize              int
-	pieceSize              int // Size of all but the last piece
-	numPieces              int
-	numDownloaded          int
-	numUploaded            int
+	metaInfoFileName string
+	trackerHostname  string
+	comment          string
+	infoHash         []byte
+	isPrivate        bool
+	piecesStr        string
+	totalSize        int
+	pieceSize        int // Size of all but the last piece
+	numPieces        int
+
+	// In bytes, for reporting to the tracker
+	numDownloaded int
+	numUploaded   int
+
 	bitfield               []byte
 	wantedBitfield         []byte
 	files                  []*TorrentFile
@@ -236,7 +239,7 @@ func bitfieldContains(bitfield []byte, pieceNum int) bool {
 }
 
 func (t *Torrent) IsComplete() bool {
-	return t.numDownloaded == t.numPieces
+	return t.numDownloaded == t.totalSize
 }
 
 func (t *Torrent) String() string {
@@ -492,6 +495,7 @@ func (t *Torrent) StartConns(peerList []string) error {
 			if errors.Is(e, messages.ErrBadInfoHash) || errors.Is(e, ErrBadPieceHash) || errors.Is(e, messages.ErrUnsupportedProtocol) {
 				// TODO: Add to blacklist
 			}
+
 			log.Println("Conn dropped:", e)
 		case <-ctx.Done():
 			fmt.Println("COMPLETED", t.metaInfoFileName)
@@ -554,6 +558,7 @@ func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error
 
 			if err := listener.SetDeadline(time.Now().Add(CONN_READ_INTERVAL)); err != nil {
 				errs <- err
+				t.Unlock()
 				return
 			}
 
@@ -586,7 +591,7 @@ func (t *Torrent) sendTrackerMessage(event trackerEventKinds) (map[string]any, e
 	queryParams.Set("port", t.portForTrackerResponse)
 	queryParams.Set("uploaded", strconv.Itoa(t.numUploaded))
 	queryParams.Set("downloaded", strconv.Itoa(t.numDownloaded))
-	queryParams.Set("left", strconv.Itoa(t.numPieces-t.numDownloaded))
+	queryParams.Set("left", strconv.Itoa(t.totalSize-t.numDownloaded))
 	queryParams.Set("event", string(event))
 	queryParams.Set("compact", "1")
 	if t.trackerId != "" {
@@ -622,7 +627,7 @@ func (t *Torrent) sendTrackerMessage(event trackerEventKinds) (map[string]any, e
 	}
 
 	if failureReason, ok := response["failure reason"]; ok {
-		return nil, errors.New("TRACKER FAILURE REASON: " + failureReason.(string))
+		return nil, errors.New("TRACKER FAILURE: " + failureReason.(string))
 	}
 
 	return response, nil
@@ -678,7 +683,13 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 
 		// NOTE: Piece could be empty and still correct at this point, if intentionally so
 		t.safeSetBitfield(p.num)
-		t.numDownloaded++
+
+		currPieceSize := t.pieceSize
+		if p.num == t.numPieces-1 {
+			currPieceSize = t.totalSize - p.num*t.pieceSize
+		}
+		t.storeDownloaded(t.numDownloaded + currPieceSize)
+
 		existingPieces = append(existingPieces, p.num)
 		clear(p.data)
 	}
@@ -1041,7 +1052,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 					return
 				}
 
-				t.storeDownloaded(t.numDownloaded + 1)
+				t.storeDownloaded(t.numDownloaded + currPieceSize)
 				t.safeSetBitfield(msg.PieceNum)
 				fmt.Printf("%b\n", t.bitfield)
 
