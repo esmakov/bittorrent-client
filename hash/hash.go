@@ -17,51 +17,25 @@ func HashSHA1(b []byte) ([]byte, error) {
 	return hash, nil
 }
 
-// Credit: ChatGPT
-func CustomURLEscape(input []byte) string {
-	escaped := make([]byte, 0, 3*len(input))
-	hexDigits := "0123456789abcdef"
-	urlReserved := map[byte]bool{
-		'#':  true,
-		'=':  true,
-		'/':  true,
-		'?':  true,
-		';':  true,
-		':':  true,
-		'@':  true,
-		'<':  true,
-		'>':  true,
-		'"':  true,
-		'&':  true,
-		'{':  true,
-		'}':  true,
-		'|':  true,
-		'\\': true,
-		'^':  true,
-		'~':  true,
-		'[':  true,
-		']':  true,
-		'`':  true,
-		'\'': true,
-		'$':  true,
-		'-':  true,
-		'_':  true,
-		'.':  true,
-		'+':  true,
-		'!':  true,
-		'*':  true,
-		'(':  true,
-		')':  true,
-		',':  true,
-	}
+/*
+https://wiki.theory.org/BitTorrentSpecification#Tracker_HTTP.2FHTTPS_Protocol
+
+"bytes not in the set 0-9, a-z, A-Z, '.', '-', '_' and '~', must be encoded using the "%nn" format, where nn is the hexadecimal value of the byte."
+*/
+func URLSanitize(input []byte) string {
+	escaped := make([]byte, 0, 20*3)
+	hexDigits := "0123456789ABCDEF"
+
+	allowedSpecial := []byte{'.', '-', '_', '~'}
+
 	for _, b := range input {
-		if b >= 0x20 && b <= 0x7E && !urlReserved[b] {
+		if (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || bytes.Contains(allowedSpecial, []byte{b}) {
 			// For printable ASCII characters that are not reserved, append them as is
 			escaped = append(escaped, b)
 		} else {
-			// Append '%' followed by the hexadecimal representation of the byte
 			escaped = append(escaped, '%', hexDigits[b>>4], hexDigits[b&0x0F])
 		}
 	}
+
 	return string(escaped)
 }
