@@ -162,6 +162,10 @@ func parseAndVerifyHandshake(buf []byte, expectedInfoHash []byte) (PeerMessage, 
 	}, nil
 }
 
+/*
+Unless specified otherwise, all integers in the peer wire protocol are encoded as four byte big-endian values. This includes the length prefix on all messages that come after the handshake.
+*/
+
 // <pstrlen><pstr><reserved><info_hash><peer_id>
 func CreateHandshakeMsg(infoHash []byte, peerId []byte) []byte {
 	protocol := "BitTorrent protocol"

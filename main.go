@@ -117,22 +117,6 @@ func main() {
 	}
 
 	switch os.Args[1] {
-	case "info":
-		// TODO: Should show running status of torrent, not just default-initialized state
-		t, err := torrent.New(metaInfoFileName, false)
-		fmt.Println(t)
-
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-
-	case "parse":
-		_, err := torrent.New(metaInfoFileName, true)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
 	case "add":
 		userDesiredConns := addCmd.Int("max-peers", 5, "Set the max number of peers you want to upload/download with")
 
@@ -195,6 +179,23 @@ func main() {
 
 		if err := t.StartConns(peerList, *userDesiredConns); err != nil {
 			fmt.Printf("Torrent '%v' failed to start: %v\n", metaInfoFileName, err)
+			os.Exit(1)
+		}
+
+	case "info":
+		// TODO: Should show running status of torrent, not just default-initialized state
+		t, err := torrent.New(metaInfoFileName, false)
+		fmt.Println(t)
+
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+	case "parse":
+		_, err := torrent.New(metaInfoFileName, true)
+		if err != nil {
+			fmt.Println(err)
 			os.Exit(1)
 		}
 

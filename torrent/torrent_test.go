@@ -362,41 +362,42 @@ func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 	}
 }
 
-// func TestGetWantedPieceNumsBoundaryCrossed(t *testing.T) {
-// 	torr, err := createTorrentWithTestData(
-// 		2,
-// 		128*1024) // Each file contains exactly half a piece
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
+func TestGetWantedPieceNumsBoundaryCrossed(t *testing.T) {
+	// Each file contains exactly half a piece; 32k is the smallest piece size typically chosen
+	torr, err := createTorrentWithTestData(
+		2,
+		16*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-// 	// if torr.numPieces != 1 {
-// 	// 	t.Fatalf("Expected piece size to be %v, actual: %v\n", 1, torr.numPieces)
-// 	// }
+	if torr.numPieces != 1 {
+		t.Fatalf("Expected piece size to be %v, actual: %v\n", 1, torr.numPieces)
+	}
 
-// 	_, err = torr.OpenOrCreateFiles()
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
+	_, err = torr.OpenOrCreateFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-// 	torr.Files()[1].Wanted = false
-// 	expected := []bool{true}
+	torr.Files()[1].Wanted = false
+	expected := []bool{true}
 
-// 	actual := torr.getWantedPieces()
-// 	for i, bool := range actual {
-// 		if expected[i] != bool {
-// 			t.Fatalf("Expected to want pieces %v, actually wanted pieces %v\n", expected, actual)
-// 		}
-// 	}
+	actual := torr.getWantedPieces()
+	for i, bool := range actual {
+		if expected[i] != bool {
+			t.Fatalf("Expected to want pieces %v, actually wanted pieces %v\n", expected, actual)
+		}
+	}
 
-// 	if err := os.RemoveAll(torr.dir); err != nil {
-// 		t.Fatal(err)
-// 	}
+	if err := os.RemoveAll(torr.dir); err != nil {
+		t.Fatal(err)
+	}
 
-// 	if err := os.Remove(torr.metaInfoFileName); err != nil {
-// 		t.Fatal(err)
-// 	}
-// }
+	if err := os.Remove(torr.metaInfoFileName); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // func TestSendAndReceive(t *testing.T) {
 // 	sender, err := createTorrentWithTestData(

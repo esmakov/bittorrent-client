@@ -15,8 +15,8 @@ go run main <add>|<info>|<parse> <path/to/file.torrent>
 
 ## Features
 - Parses Bencoded .torrent files and tracker responses
-- Supports bencoding structured data for serialization
-- Parses [peer message format](https://wiki.theory.org/BitTorrentSpecification#Messages)
+- Supports Bencoding structured data for serialization
+- Parses and implements the [peer message protocol](https://wiki.theory.org/BitTorrentSpecification#Messages)
 - Downloads single or multi-file torrents
 - Checks existing data on disk and picks up from where you left off
 
@@ -25,6 +25,8 @@ go run main <add>|<info>|<parse> <path/to/file.torrent>
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
+- Send keepalives
+- Handle more than one torrent at a time
 - Blacklist misbehaving peers
 - Specify download directory
 - More subcommands: remove, pause/resume
