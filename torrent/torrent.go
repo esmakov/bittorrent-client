@@ -398,17 +398,15 @@ const (
 	   to make this obscure and hard to change as it is very rare to be useful to do so." */
 	EFFECTIVE_MAX_PEER_CONNS = 25
 
-	// TODO: Expose to user
-	USER_DESIRED_PEER_CONNS = 2
-
 	DIAL_TIMEOUT = 2 * time.Second
 
 	// Generally 2 minutes: https://wiki.theory.org/BitTorrentSpecification#keep-alive:_.3Clen.3D0000.3E
-	MESSAGE_TIMEOUT = 5 * time.Second
+	MESSAGE_TIMEOUT = 2 * time.Minute
 
 	// Decides how long handleConn waits for incoming messages (from the peer)
 	// before checking for outbound messages (from chooseResponse)
 	// or whether MESSAGE_TIMEOUT has expired
+	// Note: directly affects throughput
 	CONN_READ_INTERVAL = 100 * time.Millisecond
 
 	CLIENT_PEER_ID = "edededededededededed"
@@ -474,12 +472,12 @@ StartConns sends the "started" message to the tracker and then runs for the life
 
 StartConns will attempt to start as many connections as desired by the user, as long as there are enough peers in the swarm. It also kicks off a separate goroutine that listens for incoming connections.
 */
-func (t *Torrent) StartConns(peerList []string) error {
+func (t *Torrent) StartConns(peerList []string, userDesiredConns int) error {
 	if len(peerList) == 0 {
 		// TODO: Keep polling tracker for peers in a separate goroutine
 	}
 
-	maxPeers := min(len(peerList), USER_DESIRED_PEER_CONNS, EFFECTIVE_MAX_PEER_CONNS)
+	maxPeers := min(len(peerList), userDesiredConns, EFFECTIVE_MAX_PEER_CONNS)
 	errs := make(chan error, maxPeers)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -598,7 +596,7 @@ func (t *Torrent) sendTrackerMessage(event trackerEventKinds) (map[string]any, e
 		queryParams.Set("trackerid", t.trackerId)
 	}
 
-	reqURL.RawQuery = "info_hash=" + hash.CustomURLEscape(t.infoHash) + "&" + queryParams.Encode()
+	reqURL.RawQuery = "info_hash=" + hash.URLSanitize(t.infoHash) + "&" + queryParams.Encode()
 
 	req, err := http.NewRequest("GET", reqURL.String(), nil)
 	if err != nil {

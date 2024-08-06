@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,8 +107,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// addCmd := flag.NewFlagSet("add", flag.ExitOnError)
-	// parseCmd := flag.NewFlagSet("parse", flag.ExitOnError)
+	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
 
 	metaInfoFileName := os.Args[2]
 
@@ -128,21 +128,18 @@ func main() {
 		}
 
 	case "parse":
-		// if err := parseCmd.Parse(os.Args[3:]); err != nil {
-		// 	fmt.Println(err)
-		// 	os.Exit(1)
-		// }
-
 		_, err := torrent.New(metaInfoFileName, true)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
 	case "add":
-		// if err := addCmd.Parse(os.Args[3:]); err != nil {
-		// 	fmt.Println(err)
-		// 	os.Exit(1)
-		// }
+		userDesiredConns := addCmd.Int("max-peers", 5, "Set the max number of peers you want to upload/download with")
+
+		if err := addCmd.Parse(os.Args[3:]); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 
 		t, err := torrent.New(metaInfoFileName, false)
 		if err != nil {
@@ -196,10 +193,11 @@ func main() {
 			return
 		}
 
-		if err := t.StartConns(peerList); err != nil {
+		if err := t.StartConns(peerList, *userDesiredConns); err != nil {
 			fmt.Printf("Torrent '%v' failed to start: %v\n", metaInfoFileName, err)
 			os.Exit(1)
 		}
+
 	default:
 		fmt.Println("USAGE: No such subcommand")
 		os.Exit(1)
