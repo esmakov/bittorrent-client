@@ -28,6 +28,8 @@ const (
 	btDictEnd
 )
 
+var ErrInvalidToken = errors.New("Invalid token type")
+
 func (t btTokenKinds) String() string {
 	switch t {
 	case btNum:
@@ -51,11 +53,11 @@ func (t btTokenKinds) String() string {
 type btToken struct {
 	tokenKind btTokenKinds
 	lexeme    string
-	literal   any
+	value     any
 }
 
 type parser struct {
-	fileIdx                    int
+	cursor                     int
 	infoDictStartIdx           int
 	infoDictEndIdx             int
 	piecesStartIdx             int
@@ -123,7 +125,7 @@ func (p *parser) parse(t btToken) any {
 	case btNum:
 		fallthrough
 	case btStr:
-		return t.literal
+		return t.value
 	case btDictStart:
 		return p.parseDict()
 	case btListStart:
@@ -213,14 +215,14 @@ func (p *parser) bDecode(data []byte) error {
 			p.prettyPrint(t)
 			p.indentLevel++
 
-			p.fileIdx++
+			p.cursor++
 			data = data[1:]
 		case 'd':
 			p.expectNextTokenToBeDictKey = true
 
 			t := btToken{btDictStart, "d", nil}
 
-			if p.fileIdx == p.infoDictStartIdx && p.fileIdx != 0 {
+			if p.cursor == p.infoDictStartIdx && p.cursor != 0 {
 				t.lexeme = "INFODICT"
 			}
 
@@ -230,7 +232,7 @@ func (p *parser) bDecode(data []byte) error {
 			p.prettyPrint(t)
 			p.indentLevel++
 
-			p.fileIdx++
+			p.cursor++
 			data = data[1:]
 		case 'e':
 			switch next := p.unclosedCompoundTypes.Pop(); next.tokenKind {
@@ -246,7 +248,7 @@ func (p *parser) bDecode(data []byte) error {
 				p.indentLevel--
 				p.prettyPrint(t)
 
-				p.fileIdx++
+				p.cursor++
 				data = data[1:]
 			case btDictStart:
 				if p.unclosedCompoundTypes.Peek().tokenKind == btDictStart {
@@ -255,7 +257,7 @@ func (p *parser) bDecode(data []byte) error {
 				}
 
 				if next.lexeme == "INFODICT" {
-					p.infoDictEndIdx = p.fileIdx
+					p.infoDictEndIdx = p.cursor
 				}
 
 				t := btToken{btDictEnd, "e", nil}
@@ -264,7 +266,7 @@ func (p *parser) bDecode(data []byte) error {
 				p.indentLevel--
 				p.prettyPrint(t)
 
-				p.fileIdx++
+				p.cursor++
 				data = data[1:]
 			default:
 				return errors.New("Unrecognized token type")
@@ -289,23 +291,24 @@ func (p *parser) bDecode(data []byte) error {
 
 			p.prettyPrint(t)
 
-			p.fileIdx += idxOfE + 1
+			p.cursor += idxOfE + 1
 			data = data[idxOfE+1:] // Consume trailing 'e'
 		default:
-			// Bencoded string
+			// Bencoded string of the form '3:cat'
 			if !(c >= '0' && c <= '9') {
-				return errors.New("Unrecognized token type")
+				return ErrInvalidToken
 			}
 
 			idxOfColon := bytes.IndexByte(data, ':')
-			strLen, e := strconv.Atoi(string(data[:idxOfColon]))
-			if e != nil {
-				return e
+			strLen, err := strconv.Atoi(string(data[:idxOfColon]))
+			if err != nil {
+				return err
 			}
 
 			tokenStartIdx := idxOfColon + 1
 			tokenEndIdx := tokenStartIdx + strLen
-			p.fileIdx += tokenEndIdx
+
+			p.cursor += tokenEndIdx
 
 			lexeme := string(data[tokenStartIdx:tokenEndIdx])
 
@@ -321,7 +324,7 @@ func (p *parser) bDecode(data []byte) error {
 					p.expectNextTokenToBeDictKey = false
 
 					if t.lexeme == "info" {
-						p.infoDictStartIdx = p.fileIdx
+						p.infoDictStartIdx = p.cursor
 					}
 				} else {
 					// This string is a dict value

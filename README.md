@@ -1,9 +1,9 @@
-A minimal bittorrent client made purely as a learning project, USE AT YOUR OWN RISK.
+A simple CLI bittorrent client
 
 The [mktorrent](github.com/pobrn/mktorrent/) package is required to build test code.
 
 # Usage
-```console
+```shell
 go run main <add>|<info>|<parse> <path/to/file.torrent>
 ```
 
@@ -25,12 +25,14 @@ go run main <add>|<info>|<parse> <path/to/file.torrent>
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
-- Send keepalives
+- Spawn child process to run in background (like Caddy)
 - Handle more than one torrent at a time
+- Send keepalives
+
+- Cleaner UI (maybe take cues from Ezio)
 - Blacklist misbehaving peers
 - Specify download directory
-- More subcommands: remove, pause/resume
-- More interesting bitmask visualization
+- More interesting bitmask visualization?
 - Use already-written bencode package to generate .torrent files (instead of pobrn/mktorrent)
 - Set log level (debug, info, errors)
 

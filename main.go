@@ -185,12 +185,12 @@ func main() {
 	case "info":
 		// TODO: Should show running status of torrent, not just default-initialized state
 		t, err := torrent.New(metaInfoFileName, false)
-		fmt.Println(t)
-
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
+
+		fmt.Println(t)
 
 	case "parse":
 		_, err := torrent.New(metaInfoFileName, true)

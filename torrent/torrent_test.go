@@ -13,35 +13,7 @@ import (
 	"github.com/esmakov/bittorrent-client/messages"
 )
 
-func TestSetBitfield(t *testing.T) {
-	cases := []struct {
-		expected byte
-		arg      int
-	}{
-		{expected: 0b00010000, arg: 3},
-		{expected: 0b00000010, arg: 6},
-	}
-
-	b := make([]byte, 1)
-
-	for _, test := range cases {
-		setBitfield(b, test.arg)
-		if b[0] != byte(test.expected) {
-			t.Fatalf("Expected: %b, got: %v\n", test.expected, b[0])
-		}
-		clear(b)
-	}
-}
-
-func TestClearBitfield(t *testing.T) {
-	b := make([]byte, 1)
-	b[0] = 0xFF
-	clearBitfield(b, 3)
-	expected := 0b11101111
-	if b[0] != byte(expected) {
-		t.Fatalf("Expected: %b, got: %v\n", expected, b[0])
-	}
-}
+const SMALLEST_TYPICAL_PIECE_SIZE = 32 * 1024
 
 /*
 Creates numFiles of fileSize bytes (all set to Wanted=true) in a new directory
@@ -106,7 +78,37 @@ func createTorrentWithTestData(numFiles, fileSize int) (*Torrent, error) {
 	return torr, nil
 }
 
-func TestCheckAllPiecesFuzzed(t *testing.T) {
+func TestSetBitfield(t *testing.T) {
+	cases := []struct {
+		expected byte
+		arg      int
+	}{
+		{expected: 0b00010000, arg: 3},
+		{expected: 0b00000010, arg: 6},
+	}
+
+	b := make([]byte, 1)
+
+	for _, test := range cases {
+		setBitfield(b, test.arg)
+		if b[0] != byte(test.expected) {
+			t.Fatalf("Expected: %b, got: %v\n", test.expected, b[0])
+		}
+		clear(b)
+	}
+}
+
+func TestClearBitfield(t *testing.T) {
+	b := make([]byte, 1)
+	b[0] = 0xFF
+	clearBitfield(b, 3)
+	expected := 0b11101111
+	if b[0] != byte(expected) {
+		t.Fatalf("Expected: %b, got: %v\n", expected, b[0])
+	}
+}
+
+func TestCheckAllPieces(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		10,
 		rand.Intn(32*1024))
@@ -125,7 +127,7 @@ func TestCheckAllPiecesFuzzed(t *testing.T) {
 	}
 
 	if !torr.IsComplete() {
-		t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", torr.numDownloaded, torr.numPieces, torr.bitfield)
+		t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", torr.numDownloadedBytes, torr.numPieces, torr.bitfield)
 	}
 
 	if err := os.RemoveAll(torr.dir); err != nil {
@@ -322,13 +324,11 @@ func TestSelectNextPiece(t *testing.T) {
 	}
 }
 
-// FIXME: Find some way of controlling how many pieces are created, which involves controlling
-// the piece size, which means generating metainfo files ourselves
-
+// Pieces must be downloaded if even a single byte belongs to a file the user wants, even if the rest of the piece is in an unwanted file.
 func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		3,
-		32*1024) // Each file is exactly 1 piece big
+		SMALLEST_TYPICAL_PIECE_SIZE)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,10 +363,9 @@ func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 }
 
 func TestGetWantedPieceNumsBoundaryCrossed(t *testing.T) {
-	// Each file contains exactly half a piece; 32k is the smallest piece size typically chosen
 	torr, err := createTorrentWithTestData(
 		2,
-		16*1024)
+		SMALLEST_TYPICAL_PIECE_SIZE/2)
 	if err != nil {
 		t.Fatal(err)
 	}
