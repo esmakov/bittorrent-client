@@ -1,14 +1,23 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/esmakov/bittorrent-client/torrent"
 )
+
+var DefaultAdminListenPort = "2019"
 
 type model struct {
 	choices     []string
@@ -101,23 +110,149 @@ func (m model) View() string {
 	return s
 }
 
+func listenAdminEndpoint(wg *sync.WaitGroup) {
+	http.HandleFunc("/hello", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := w.Write([]byte("Hello"))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}))
+
+	http.HandleFunc("/stop", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := w.Write([]byte("Stopping...")) // Not sent?
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// die valiantly
+		wg.Done()
+	}))
+
+	log.Fatal(http.ListenAndServe(":"+DefaultAdminListenPort, nil))
+}
+
 func main() {
-	if len(os.Args) < 3 {
-		fmt.Printf("USAGE: %v <add>|<info>|<parse> <path/to/file.torrent>\n", filepath.Base(os.Args[0]))
+	if len(os.Args) < 2 {
+		fmt.Printf("USAGE: %v <start>|<stop>|<add>|<info>|<parse> <path/to/file.torrent>\n", filepath.Base(os.Args[0]))
 		os.Exit(1)
 	}
 
 	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
 
-	metaInfoFileName := os.Args[2]
-
-	if filepath.Ext(metaInfoFileName) != ".torrent" {
-		fmt.Println(metaInfoFileName, "is not a .torrent file.")
-		os.Exit(1)
-	}
-
 	switch os.Args[1] {
+	case "run":
+		if len(os.Args) >= 4 {
+			parentAddr := os.Args[2]
+			if os.Args[3] == "--pingback" {
+				conn, err := net.Dial("tcp", parentAddr)
+				if err != nil {
+					log.Fatal(err)
+				}
+
+				if _, err = conn.Write([]byte("hello from child\n")); err != nil {
+					log.Fatal(err)
+				}
+			}
+		}
+
+		wg := sync.WaitGroup{}
+		wg.Add(1)
+		go listenAdminEndpoint(&wg)
+		wg.Wait()
+
+		// t := time.Tick(2 * time.Second)
+		// startTime := time.Now()
+		// for {
+		// 	select {
+		// 	case <-t:
+		// 		fmt.Println(time.Since(startTime))
+		// 	}
+		// }
+
+		// listen on admin addr, go through list of torrents, talk to tracker with started event, and start conns
+
+	case "start":
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer listener.Close()
+
+		cmd := exec.Command(os.Args[0], "run", listener.Addr().String(), "--pingback")
+
+		err = cmd.Start()
+		if err != nil {
+			log.Fatal("startup:", err)
+		}
+
+		// there are two ways we know we're done: either
+		// the process will connect to our listener, or
+		// it will exit with an error
+		success, exit := make(chan struct{}), make(chan error)
+
+		// in one goroutine, we await the success of the child process
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				defer conn.Close()
+
+				if err != nil {
+					if !errors.Is(err, net.ErrClosed) {
+						log.Println(err)
+					}
+					break
+				}
+
+				tempBuf := make([]byte, 1024)
+				_, err = conn.Read(tempBuf)
+				if err != nil {
+					log.Println(err)
+				}
+
+				fmt.Printf("%s\n", tempBuf)
+				close(success)
+				break
+			}
+		}()
+
+		// in another goroutine, we await the failure of the child process
+		go func() {
+			err := cmd.Wait() // don't send on this line! Wait blocks, but send starts before it unblocks
+			exit <- err       // sending on separate line ensures select won't trigger until after Wait unblocks
+		}()
+
+		// when one of the goroutines unblocks, we're done and can exit
+		select {
+		case <-success:
+			fmt.Printf("Successfully started (pid=%d) in the background\n", cmd.Process.Pid)
+		case err := <-exit:
+			log.Fatalf("Child process exited with error: %v", err)
+		}
+
+	case "stop":
+		log.Printf("Sending stop request")
+		resp, err := http.Post("http://:"+DefaultAdminListenPort+"/stop", "text/plain", nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		bytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		log.Printf("Child responded: %s\n", bytes)
+		resp.Body.Close()
+
 	case "add":
+		panic("WIP")
+
+		metaInfoFileName := os.Args[2]
+		if filepath.Ext(metaInfoFileName) != ".torrent" {
+			fmt.Println(metaInfoFileName, "is not a .torrent file.")
+			os.Exit(1)
+		}
+
 		userDesiredConns := addCmd.Int("max-peers", 5, "Set the max number of peers you want to upload/download with")
 
 		if err := addCmd.Parse(os.Args[3:]); err != nil {
@@ -129,6 +264,8 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
+
+		// TODO: Add this torrent to list of torrents via API call
 
 		var choices []string
 		for _, f := range t.Files() {
@@ -151,6 +288,8 @@ func main() {
 		}
 
 		t.SetWantedBitfield()
+
+		// TODO: From here on, do this in the request handler in the API
 
 		filesToCheck, err := t.OpenOrCreateFiles()
 		if err != nil {
@@ -183,7 +322,13 @@ func main() {
 		}
 
 	case "info":
-		// TODO: Should show running status of torrent, not just default-initialized state
+		// TODO: Should show running status of any active torrent, not just default-initialized state
+		metaInfoFileName := os.Args[2]
+		if filepath.Ext(metaInfoFileName) != ".torrent" {
+			fmt.Println(metaInfoFileName, "is not a .torrent file.")
+			os.Exit(1)
+		}
+
 		t, err := torrent.New(metaInfoFileName, false)
 		if err != nil {
 			fmt.Println(err)
@@ -193,6 +338,12 @@ func main() {
 		fmt.Println(t)
 
 	case "parse":
+		metaInfoFileName := os.Args[2]
+		if filepath.Ext(metaInfoFileName) != ".torrent" {
+			fmt.Println(metaInfoFileName, "is not a .torrent file.")
+			os.Exit(1)
+		}
+
 		_, err := torrent.New(metaInfoFileName, true)
 		if err != nil {
 			fmt.Println(err)
