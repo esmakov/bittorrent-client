@@ -167,7 +167,7 @@ Unless specified otherwise, all integers in the peer wire protocol are encoded a
 */
 
 // <pstrlen><pstr><reserved><info_hash><peer_id>
-func CreateHandshakeMsg(infoHash []byte, peerId []byte) []byte {
+func CreateHandshake(infoHash []byte, peerId []byte) []byte {
 	protocol := "BitTorrent protocol"
 	protocolBytes := make([]byte, len(protocol))
 	copy(protocolBytes, protocol)
@@ -178,16 +178,16 @@ func CreateHandshakeMsg(infoHash []byte, peerId []byte) []byte {
 	return ConcatMultipleSlices([][]byte{length, protocolBytes, reserved, infoHash, peerId})
 }
 
-func CreateChokeMsg() []byte {
+func CreateChoke() []byte {
 	return []byte{0x00, 0x00, 0x00, 0x01, 0x00}
 }
 
-func CreateUnchokeMsg() []byte {
+func CreateUnchoke() []byte {
 	return []byte{0x00, 0x00, 0x00, 0x01, 0x01}
 }
 
 // <len=0001><id=2>
-func CreateInterestedMsg() []byte {
+func CreateInterested() []byte {
 	lenBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBytes, uint32(1))
 	return ConcatMultipleSlices([][]byte{lenBytes, {0x02}})
@@ -200,7 +200,7 @@ func CreateInterestedMsg() []byte {
 
 The bitfield message is variable length, where X is the length of the bitfield. The payload is a bitfield representing the pieces that have been successfully downloaded. The high bit in the first byte corresponds to piece index 0. Bits that are cleared indicated a missing piece, and set bits indicate a valid and available piece. Spare bits at the end are set to zero."
 */
-func CreateBitfieldMsg(bitfield []byte) []byte {
+func CreateBitfield(bitfield []byte) []byte {
 	lenBytes := make([]byte, 4)
 	length := 1 + len(bitfield)
 	binary.BigEndian.PutUint32(lenBytes, uint32(length))
@@ -208,7 +208,7 @@ func CreateBitfieldMsg(bitfield []byte) []byte {
 }
 
 // <len=0013><id=6><index><begin><length>
-func CreateRequestMsg(pieceNum, offset, length uint32) []byte {
+func CreateRequest(pieceNum, offset, length uint32) []byte {
 	lengthAndID := []byte{
 		0x00,
 		0x00,
@@ -229,7 +229,7 @@ func CreateRequestMsg(pieceNum, offset, length uint32) []byte {
 }
 
 // <len=0009+X><id=7><index><begin><block>
-func CreatePieceMsg(pieceNum, offset uint32, block []byte) []byte {
+func CreatePiece(pieceNum, offset uint32, block []byte) []byte {
 	lengthBytes := make([]byte, 4)
 	length := uint32(9 + len(block))
 	binary.BigEndian.PutUint32(lengthBytes, length)

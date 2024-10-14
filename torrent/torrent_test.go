@@ -306,7 +306,7 @@ func TestSelectNextPiece(t *testing.T) {
 		torr.bitfield[i] &= 0x00
 	}
 
-	actual, err := torr.selectNextPiece(p.num, peerBitfield)
+	actual, err := torr.selectNextPieceSeq(p.num, peerBitfield)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestGetWantedPieceNumsBoundaryCrossed(t *testing.T) {
 	}
 
 	if torr.numPieces != 1 {
-		t.Fatalf("Expected there to be %v pieces, actual: %v\n", 1, torr.numPieces)
+		t.Fatalf("Expected there to be 1 piece, actual: %v\n", torr.numPieces)
 	}
 
 	_, err = torr.OpenOrCreateFiles()

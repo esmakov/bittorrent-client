@@ -25,11 +25,10 @@ go run main <add>|<info>|<parse> <path/to/file.torrent>
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
-- Spawn child process to run in background (like Caddy)
 - Handle more than one torrent at a time
 - Send keepalives
+- Switch over to bytes.Buffer where appropriate
 
-- Cleaner UI (maybe take cues from Ezio)
 - Blacklist misbehaving peers
 - Specify download directory
 - More interesting bitmask visualization?
