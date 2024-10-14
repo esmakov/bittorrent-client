@@ -30,8 +30,6 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 		bufs = append(bufs, &torr.Logbuf)
 	}
 
-	fmt.Printf("bufs: %v\n", bufs)
-
 	http.HandleFunc("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := struct{ Bufs []string }{Bufs: make([]string, len(torrents))}
 		for i, b := range bufs {
