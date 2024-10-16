@@ -68,7 +68,7 @@ func createTorrentWithTestData(numFiles, fileSize int) (*Torrent, error) {
 		return new(Torrent), err
 	}
 
-	for _, file := range torr.Files() {
+	for _, file := range torr.Files {
 		file.Wanted = true
 	}
 
@@ -108,6 +108,24 @@ func TestClearBitfield(t *testing.T) {
 	}
 }
 
+func TestPopCount(t *testing.T) {
+	cases := []struct {
+		expected int
+		arg      byte
+	}{
+		{expected: 4, arg: 0b0010_0111},
+		{expected: 2, arg: 0b1000_0001},
+		{expected: 1, arg: 0b1000_0000},
+	}
+
+	for _, v := range cases {
+		res := PopCount(v.arg)
+		if res != v.expected {
+			t.Fatalf("Expected: %v, got: %v\n", v.expected, res)
+		}
+	}
+}
+
 func TestCheckAllPieces(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		10,
@@ -126,15 +144,20 @@ func TestCheckAllPieces(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	n := 0
+	for _, b := range torr.bitfield {
+		n += PopCount(b)
+	}
+
 	if !torr.IsComplete() {
-		t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", torr.numDownloadedBytes, torr.numPieces, torr.bitfield)
+		t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", n, torr.numPieces, torr.bitfield)
 	}
 
 	if err := os.RemoveAll(torr.dir); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
+	if err := os.Remove(torr.MetaInfoFileName); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -186,7 +209,7 @@ func TestSavePieceToDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
+	if err := os.Remove(torr.MetaInfoFileName); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -230,7 +253,7 @@ func TestGetPieceFromDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
+	if err := os.Remove(torr.MetaInfoFileName); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -276,7 +299,7 @@ func TestSplitIntoBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
+	if err := os.Remove(torr.MetaInfoFileName); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -319,7 +342,7 @@ func TestSelectNextPiece(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
+	if err := os.Remove(torr.MetaInfoFileName); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -343,7 +366,7 @@ func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 		t.Fatalf("Expected %v pieces, actual: %v\n", 3, torr.numPieces)
 	}
 
-	torr.Files()[1].Wanted = false
+	torr.Files[1].Wanted = false
 	expected := []bool{true, false, true}
 
 	actual := torr.getWantedPieces()
@@ -357,7 +380,7 @@ func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
+	if err := os.Remove(torr.MetaInfoFileName); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -379,7 +402,7 @@ func TestGetWantedPieceNumsBoundaryCrossed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	torr.Files()[1].Wanted = false
+	torr.Files[1].Wanted = false
 	expected := []bool{true}
 
 	actual := torr.getWantedPieces()
@@ -393,7 +416,7 @@ func TestGetWantedPieceNumsBoundaryCrossed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(torr.metaInfoFileName); err != nil {
+	if err := os.Remove(torr.MetaInfoFileName); err != nil {
 		t.Fatal(err)
 	}
 }

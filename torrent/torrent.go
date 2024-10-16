@@ -27,27 +27,34 @@ import (
 	"github.com/esmakov/bittorrent-client/parser"
 )
 
-type Torrent struct {
-	metaInfoFileName   string
-	trackerHostname    string
-	comment            string
-	infoHash           []byte
-	isPrivate          bool
-	piecesStr          string
-	totalSize          int
-	pieceSize          int // Size of all but the last piece
-	numPieces          int
-	numDownloadedBytes int
-	numUploadedBytes   int
+type TorrentMetaInfo struct {
+	MetaInfoFileName string
+	trackerHostname  string
+	comment          string
+	infoHash         []byte
+	isPrivate        bool
+	piecesStr        string
+	totalSize        int
+	pieceSize        int // Size of all but the last piece
+	numPieces        int
+	dir              string
+}
 
+type TorrentOptions struct {
+	UserDesiredConns int
+}
+
+type Torrent struct {
+	TorrentMetaInfo
+	TorrentOptions
+
+	numUploadedBytes       int
 	bitfield               []byte
 	wantedBitfield         []byte
-	files                  []*TorrentFile
+	Files                  []*TorrentFile
 	lastChecked            time.Time
-	dir                    string
 	portForTrackerResponse string
 	activeConns            map[string]net.Conn
-	userDesiredConns       int
 
 	// Optionally sent by server
 	trackerId string
@@ -160,20 +167,22 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 	}
 
 	t := &Torrent{
-		metaInfoFileName:       metaInfoFileName,
-		trackerHostname:        announce,
-		infoHash:               infoHash,
-		comment:                comment,
-		isPrivate:              isPrivate == 1,
-		piecesStr:              bPieces,
-		pieceSize:              bPieceLength,
-		numPieces:              numPieces,
-		totalSize:              totalSize,
+		TorrentMetaInfo: TorrentMetaInfo{
+			MetaInfoFileName: metaInfoFileName,
+			trackerHostname:  announce,
+			infoHash:         infoHash,
+			comment:          comment,
+			isPrivate:        isPrivate == 1,
+			piecesStr:        bPieces,
+			pieceSize:        bPieceLength,
+			numPieces:        numPieces,
+			totalSize:        totalSize,
+			dir:              dir,
+		},
 		bitfield:               make([]byte, bitfieldLen),
 		wantedBitfield:         make([]byte, bitfieldLen),
 		activeConns:            map[string]net.Conn{},
-		files:                  files,
-		dir:                    dir,
+		Files:                  files,
 		portForTrackerResponse: getNextFreePort(),
 	}
 
@@ -200,10 +209,18 @@ func (t *Torrent) storeUploaded(n int) {
 	t.numUploadedBytes = n
 }
 
-func (t *Torrent) storeDownloaded(n int) {
-	t.Lock()
-	defer t.Unlock()
-	t.numDownloadedBytes = n
+func (t *Torrent) numBytesDownloaded() int {
+	n := 0
+	for _, b := range t.bitfield {
+		n += PopCount(b)
+	}
+
+	if bitfieldContains(t.bitfield, t.numPieces-1) {
+		sizeOfLast := t.totalSize - ((t.numPieces - 1) * t.pieceSize)
+		return (n-1)*t.pieceSize + sizeOfLast
+	}
+
+	return n * t.numPieces
 }
 
 func (t *Torrent) safeSetBitfield(pieceNum int) {
@@ -246,7 +263,7 @@ func bitfieldContains(bitfield []byte, pieceNum int) bool {
 }
 
 func (t *Torrent) IsComplete() bool {
-	return t.numDownloadedBytes == t.totalSize
+	return t.numBytesDownloaded() == t.totalSize
 }
 
 func (t *Torrent) String() string {
@@ -256,7 +273,7 @@ func (t *Torrent) String() string {
 	}
 
 	numWanted := 0
-	for _, file := range t.files {
+	for _, file := range t.Files {
 		if file.Wanted {
 			numWanted++
 		}
@@ -264,13 +281,13 @@ func (t *Torrent) String() string {
 
 	sb.WriteString(fmt.Sprint(
 		fmt.Sprintln("--------------Torrent Info--------------"),
-		fmt.Sprintln("Torrent file:", t.metaInfoFileName),
+		fmt.Sprintln("Torrent file:", t.MetaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
 		fmt.Sprintln("Total size:", t.totalSize),
-		fmt.Sprintf("Selected %v of %v file(s):\n", numWanted, len(t.files)),
+		fmt.Sprintf("Selected %v of %v file(s):\n", numWanted, len(t.Files)),
 	))
 
-	for _, file := range t.files {
+	for _, file := range t.Files {
 		marker := "N"
 		if file.Wanted {
 			marker = "Y"
@@ -285,17 +302,12 @@ func (t *Torrent) String() string {
 	return sb.String()
 }
 
-// Returns the TorrentFiles by pointer so their Wanted field can be updated with user input in main
-func (t *Torrent) Files() []*TorrentFile {
-	return t.files
-}
-
-// Returns a slice where the index corresponds to the piece number, and the value is true if the piece is wanted.
+// Returns a bool slice of wanted pieces, based on which files the user wants. The slice index corresponds to the 0-indexed piece numbers.
 func (t *Torrent) getWantedPieces() []bool {
 	wantedPieces := make([]bool, t.numPieces)
 
 	fileEndIdx := int64(0)
-	for _, file := range t.Files() {
+	for _, file := range t.Files {
 		fileEndIdx += file.finalSize
 
 		if !file.Wanted {
@@ -336,6 +348,15 @@ func (t *Torrent) SetWantedBitfield() {
 	}
 }
 
+func PopCount(b byte) int {
+	count := 0
+	for b > 0 {
+		count += int(b & 1)
+		b >>= 1
+	}
+	return count
+}
+
 /*
 Opens the TorrentFiles' descriptors for writing and returns the ones that have been modified since the torrent was last checked.
 
@@ -355,7 +376,7 @@ func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
 		}
 	}
 
-	for _, file := range t.files {
+	for _, file := range t.Files {
 		if t.dir != "" {
 			file.Path = filepath.Join(t.dir, file.Path)
 		}
@@ -503,7 +524,7 @@ func (t *Torrent) StartConns(peerList []string, userDesiredConns int) error {
 
 			log.Println("Conn dropped:", e)
 		case <-ctx.Done():
-			fmt.Println("COMPLETED", t.metaInfoFileName)
+			fmt.Println("COMPLETED", t.MetaInfoFileName)
 
 			// NOTE: Tracker only expects this once
 			// Make sure this doesn't happen if the download started at 100% already
@@ -558,7 +579,7 @@ func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("INFO: Torrent", filepath.Base(t.metaInfoFileName), "complete, no longer accepting conns")
+			log.Println("INFO: Torrent", filepath.Base(t.MetaInfoFileName), "complete, no longer accepting conns")
 			return
 		default:
 			t.Lock()
@@ -607,8 +628,8 @@ func (t *Torrent) sendTrackerMessage(event trackerEventKinds) (map[string]any, e
 	queryParams.Set("peer_id", CLIENT_PEER_ID)
 	queryParams.Set("port", t.portForTrackerResponse)
 	queryParams.Set("uploaded", strconv.Itoa(t.numUploadedBytes))
-	queryParams.Set("downloaded", strconv.Itoa(t.numDownloadedBytes))
-	queryParams.Set("left", strconv.Itoa(t.totalSize-t.numDownloadedBytes))
+	queryParams.Set("downloaded", strconv.Itoa(t.numBytesDownloaded()))
+	queryParams.Set("left", strconv.Itoa(t.totalSize-t.numBytesDownloaded()))
 	queryParams.Set("event", string(event))
 	queryParams.Set("compact", "1")
 	if t.trackerId != "" {
@@ -701,13 +722,6 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 		// NOTE: Piece could be empty and still correct at this point, if intentionally so
 		t.safeSetBitfield(p.num)
 
-		currPieceSize := t.pieceSize
-		if p.num == t.numPieces-1 {
-			currPieceSize = t.totalSize - p.num*t.pieceSize
-		}
-
-		t.storeDownloaded(t.numDownloadedBytes + currPieceSize)
-
 		existingPieces = append(existingPieces, p.num)
 		clear(p.data)
 	}
@@ -727,12 +741,12 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 	pieceStartIdx := int64(p.num * t.pieceSize)
 	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
-	if len(t.files) == 1 {
-		if t.files[0].fd == nil {
+	if len(t.Files) == 1 {
+		if t.Files[0].fd == nil {
 			return errors.New("Nil file descriptor")
 		}
 
-		fileInfo, err := os.Stat(t.files[0].Path)
+		fileInfo, err := os.Stat(t.Files[0].Path)
 		if err != nil {
 			return err
 		}
@@ -740,7 +754,7 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 		if pieceStartIdx >= fileInfo.Size() {
 			return ErrPieceNotOnDisk
 		}
-		_, err = t.files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
+		_, err = t.Files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
 		return err
 	}
 
@@ -750,7 +764,7 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 		startReadAt        = 0
 	)
 
-	for _, currFile := range t.files {
+	for _, currFile := range t.Files {
 		fileEndIdx := fileStartIdx + currFile.finalSize
 
 		if !currFile.Wanted || pieceStartIdx >= fileEndIdx {
@@ -844,8 +858,8 @@ func (t *Torrent) writePieceToDisk(p *pieceData) error {
 	pieceStartIdx := int64(p.num * t.pieceSize)
 	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
 
-	if len(t.files) == 1 {
-		_, err := t.files[0].fd.WriteAt(p.data[:currPieceSize], pieceStartIdx)
+	if len(t.Files) == 1 {
+		_, err := t.Files[0].fd.WriteAt(p.data[:currPieceSize], pieceStartIdx)
 		return err
 	}
 
@@ -855,7 +869,7 @@ func (t *Torrent) writePieceToDisk(p *pieceData) error {
 		startWriteAt       = 0
 	)
 
-	for _, currFile := range t.files {
+	for _, currFile := range t.Files {
 		fileEndIdx := fileStartIdx + currFile.finalSize
 
 		if pieceStartIdx >= fileEndIdx {
@@ -1090,7 +1104,6 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 						return
 					}
 
-					t.storeDownloaded(t.numDownloadedBytes + currPieceSize)
 					t.safeSetBitfield(msg.PieceNum)
 					fmt.Printf("%b\n", t.bitfield)
 
@@ -1172,7 +1185,7 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 		offset += blockSize
 	}
 
-	t.storeUploaded(t.numUploadedBytes + 1)
+	t.storeUploaded(t.numUploadedBytes + currPieceSize)
 
 	return nil
 }
