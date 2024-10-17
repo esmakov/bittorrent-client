@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"html/template"
 	"io"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/itchyny/gojq"
+
 	"github.com/esmakov/bittorrent-client/torrent"
 )
 
@@ -113,7 +116,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// addCmd := flag.NewFlagSet("add", flag.ExitOnError)
+	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
 
 	switch os.Args[1] {
 	case "run":
@@ -251,53 +254,137 @@ func main() {
 		resp.Body.Close()
 
 	case "add":
-		panic("WIP")
+		if len(os.Args) < 3 {
+			log.Fatalln("Not enough arguments")
+		}
 
-		// metaInfoFileName := os.Args[2]
-		// if filepath.Ext(metaInfoFileName) != ".torrent" {
-		// 	fmt.Println(metaInfoFileName, "is not a .torrent file.")
-		// 	os.Exit(1)
-		// }
+		metaInfoFileName := os.Args[2]
+		if filepath.Ext(metaInfoFileName) != ".torrent" {
+			fmt.Println(metaInfoFileName, "is not a .torrent file.")
+			os.Exit(1)
+		}
 
-		// userDesiredConns := addCmd.Int("max-peers", 5, "Set the max number of peers you want to upload/download with")
+		userDesiredConns := addCmd.Int("conns", 5, "Set the max number of peers you want to upload/download with")
 
-		// if err := addCmd.Parse(os.Args[3:]); err != nil {
-		// 	fmt.Println(err)
-		// 	os.Exit(1)
-		// }
+		if err := addCmd.Parse(os.Args[3:]); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 
-		// t, err := torrent.New(metaInfoFileName, false)
-		// if err != nil {
-		// 	panic(err)
-		// }
+		t, err := torrent.New(metaInfoFileName, false)
+		if err != nil {
+			panic(err)
+		}
 
-		// // TODO: Add this torrent to list of torrents via API call
+		var choices []string
+		for _, f := range t.Files {
+			choices = append(choices, f.Path)
+		}
 
-		// var choices []string
-		// for _, f := range t.Files() {
-		// 	choices = append(choices, f.Path)
-		// }
+		m := initialModel(choices)
+		p := tea.NewProgram(m)
+		if _, err := p.Run(); err != nil {
+			fmt.Printf("BubbleTea error: %v", err)
+			os.Exit(1)
+		}
 
-		// m := initialModel(choices)
-		// p := tea.NewProgram(m)
-		// if _, err := p.Run(); err != nil {
-		// 	fmt.Printf("BubbleTea error: %v", err)
-		// 	os.Exit(1)
-		// }
+		rec := TorrentRecord{
+			MetaInfoFileName: metaInfoFileName,
+			UserDesiredConns: *userDesiredConns,
+			WantedFiles:      make(map[int]struct{}),
+		}
 
-		// for k := range m.selected {
-		// 	t.Files()[k].Wanted = true
-		// }
+		for k := range m.selected {
+			if _, ok := m.selected[k]; ok {
+				rec.WantedFiles[k] = struct{}{}
+			}
+		}
 
-		// if len(m.selected) == 0 {
-		// 	os.Exit(0)
-		// }
+		cf, err := openConfigFile()
+		if err != nil {
+			log.Fatalln(err)
+		}
 
-		// t.SetWantedBitfield()
+		info, err := cf.Stat()
+		if err != nil {
+			log.Fatalln(err)
+		}
 
-		// // update t.userDesiredConns with the provided flag
-		// // add t to TorrentRecords and persist on disk
-		// // signal server to refresh?
+		if info.Size() == int64(0) {
+			// Initialize with top level array
+			_, err := cf.WriteString("[]")
+			if err != nil {
+				log.Fatalln(err)
+			}
+
+			// Move the file cursor back
+			_, err = cf.Seek(0, io.SeekStart)
+			if err != nil {
+				log.Fatalln(err)
+			}
+		}
+
+		configBytes, err := io.ReadAll(cf)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		var oldRecs []any
+		if err = json.Unmarshal(configBytes, &oldRecs); err != nil {
+			log.Fatalln("unmarshal:", err)
+		}
+
+		// Filter out existing record for this torrent
+		q, err := gojq.Parse(".[] | select(.MetaInfoFileName != $s)")
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		code, err := gojq.Compile(q, gojq.WithVariables([]string{"$s"}))
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		var newRecs []any
+		iter := code.Run(oldRecs, rec.MetaInfoFileName)
+		for {
+			v, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if err, ok := v.(error); ok {
+				if err, ok := err.(*gojq.HaltError); ok && err.Value() == nil {
+					break
+				}
+				log.Fatalln(err)
+			}
+
+			newRecs = append(newRecs, v)
+		}
+
+		newRecs = append(newRecs, rec)
+
+		b, err := json.Marshal(newRecs)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		// Overwrite existing contents
+		if err = cf.Truncate(0); err != nil {
+			log.Fatalln(err)
+		}
+
+		_, err = cf.Seek(0, io.SeekStart)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		_, err = cf.Write(b)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		// signal client to refresh?
 
 	case "info":
 		// TODO: Should show running status of any active torrent, not just default-initialized state
