@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -64,31 +65,22 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 // All the info we need to persist to start/resume torrents, and none
 // of the changing state (bitfield, etc)
 type TorrentRecord struct {
-	metaInfoFileName string
-	userDesiredConns int
-	wantedFiles      map[int]struct{}
-	lastChecked      map[int]time.Time
+	MetaInfoFileName string
+	UserDesiredConns int
+	WantedFiles      map[int]struct{}
+	LastChecked      map[int]time.Time
 }
 
 type GlobalOptions struct {
 	maxPeers int
 }
 
-// Sets up each torrent based on the info in its associated persistent record
 // Opens the files, checks pieces on disk, gets the swarm information, and starts connecting
-func kickOffTorrents(torrentRecords []TorrentRecord, torrs []*torrent.Torrent) {
-	for i, rec := range torrentRecords {
-		t := torrs[i]
-
+func kickOffTorrents(torrs []*torrent.Torrent) {
+	for _, t := range torrs {
 		filesToCheck, err := t.OpenOrCreateFiles()
 		if err != nil {
-			log.Fatal(err)
-		}
-
-		for k := range rec.wantedFiles {
-			if _, ok := rec.wantedFiles[k]; ok {
-				t.Files()[k].Wanted = true
-			}
+			log.Fatalln(err)
 		}
 
 		t.SetWantedBitfield()
@@ -130,38 +122,57 @@ func main() {
 			if os.Args[3] == "--pingback" {
 				conn, err := net.Dial("tcp", parentAddr)
 				if err != nil {
-					log.Fatal(err)
+					log.Fatalln(err)
 				}
 
 				if _, err = conn.Write([]byte("Starting...\n")); err != nil {
-					log.Fatal(err)
+					log.Fatalln(err)
 				}
 			}
 		}
 
-		// TODO: Persist a file of records on disk and read from it
-		torrentRecords := []TorrentRecord{{
-			metaInfoFileName: "debian-12.2.0-amd64-netinst.iso.torrent",
-			wantedFiles:      make(map[int]struct{}),
-			userDesiredConns: 1,
-		}}
-		torrentRecords[0].wantedFiles[0] = struct{}{}
+		cf, err := openConfigFile()
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		configBytes, err := io.ReadAll(cf)
+		_ = configBytes
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		var records []TorrentRecord
+		err = json.Unmarshal(configBytes, &records)
+		if err != nil {
+			log.Fatalln(err)
+		}
 
 		wg := sync.WaitGroup{}
 		wg.Add(1)
 
-		torrs := make([]*torrent.Torrent, 0)
-		for _, tr := range torrentRecords {
-			t, err := torrent.New(tr.metaInfoFileName, false)
+		var torrs []*torrent.Torrent
+		for _, rec := range records {
+			t, err := torrent.New(rec.MetaInfoFileName, false)
 			if err != nil {
-				log.Fatal(err)
+				log.Fatalln(err)
 			}
+
+			for k := range rec.WantedFiles {
+				if _, ok := rec.WantedFiles[k]; ok {
+					t.Files[k].Wanted = true
+				}
+			}
+
+			t.UserDesiredConns = rec.UserDesiredConns
+
 			torrs = append(torrs, t)
+			fmt.Printf("t: %v\n", t)
 		}
 
 		go listenAdminEndpoint(&wg, torrs)
 
-		go kickOffTorrents(torrentRecords, torrs)
+		go kickOffTorrents(torrs)
 
 		// Keep the process going until the API's stop handler is triggered
 		wg.Wait()
@@ -221,19 +232,19 @@ func main() {
 		case <-success:
 			fmt.Printf("Successfully started (pid=%d) in the background\n", cmd.Process.Pid)
 		case err := <-exit:
-			log.Fatalf("Child process exited with error: %v", err)
+			log.Fatalln("Child process exited with error: ", err)
 		}
 
 	case "stop":
 		log.Printf("Sending stop request")
 		resp, err := http.Post("http://127.0.0.1:"+DefaultAdminListenPort+"/stop", "text/plain", nil)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalln(err)
 		}
 
 		bytes, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalln(err)
 		}
 
 		log.Printf("Child responded: %s\n", bytes)
@@ -292,14 +303,12 @@ func main() {
 		// TODO: Should show running status of any active torrent, not just default-initialized state
 		metaInfoFileName := os.Args[2]
 		if filepath.Ext(metaInfoFileName) != ".torrent" {
-			fmt.Println(metaInfoFileName, "is not a .torrent file.")
-			os.Exit(1)
+			log.Fatalln(metaInfoFileName, "is not a .torrent file.")
 		}
 
 		t, err := torrent.New(metaInfoFileName, false)
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			log.Fatalln(err)
 		}
 
 		fmt.Println(t)
@@ -320,6 +329,20 @@ func main() {
 		os.Exit(1)
 	}
 	return
+}
+
+func openConfigFile() (*os.File, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+
+	configFile, err := os.OpenFile(filepath.Join(homeDir, ".config", "abc.json"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+
+	return configFile, nil
 }
 
 type model struct {
