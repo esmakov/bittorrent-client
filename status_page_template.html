@@ -1,11 +1,18 @@
 <html>
 
 <head>
-    <title>Another BitTorrent Client - Admin</title>
+    <title>Another BitTorrent Client</title>
+    <script src="https://cdn.tailwindcss.com"></script>
 </head>
 
 <body>
-    <p>{{range .Bufs}}{{.}}{{end}} </p>
+    <main class="flex flex-col items-center">
+        <h1 class="text-xl">Another BitTorrent Client</h1>
+        {{range .}}
+        <h2 class="text-lg">{{.Name}}</h2>
+        <textarea class="w-[50%] h-36">{{.Buf}}</textarea>
+        {{end}}
+    </main>
 </body>
 
 </html>

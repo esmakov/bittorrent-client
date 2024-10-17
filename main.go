@@ -25,40 +25,40 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 	fmt.Println("Admin dashboard running on port " + DefaultAdminListenPort)
 	tmpl := template.Must(template.ParseFiles("status_page_template.html"))
 
-	bufs := make([]*bytes.Buffer, 0)
+	// TODO: Enforce max size so we don't run out of memory
+	var bufs []*bytes.Buffer
 	for _, torr := range torrents {
 		bufs = append(bufs, &torr.Logbuf)
 	}
 
 	http.HandleFunc("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s := struct{ Bufs []string }{Bufs: make([]string, len(torrents))}
-		for i, b := range bufs {
-			s.Bufs[i] = b.String()
-		}
-		err := tmpl.Execute(w, s)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}))
+		reports := make([]struct {
+			Name string
+			Buf  string
+		}, len(torrents))
 
-	http.HandleFunc("/hello", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := w.Write([]byte("Hello"))
+		for i, b := range bufs {
+			reports[i].Name = torrents[i].MetaInfoFileName
+			reports[i].Buf = b.String()
+		}
+
+		err := tmpl.Execute(w, reports)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalln(err)
 		}
 	}))
 
 	http.HandleFunc("/stop", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, err := w.Write([]byte("Stopping..."))
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalln(err)
 		}
 
 		// die valiantly
 		wg.Done()
 	}))
 
-	log.Fatal(http.ListenAndServe("127.0.0.1:"+DefaultAdminListenPort, nil))
+	log.Fatalln(http.ListenAndServe("127.0.0.1:"+DefaultAdminListenPort, nil))
 }
 
 // All the info we need to persist to start/resume torrents, and none
@@ -96,7 +96,7 @@ func kickOffTorrents(torrentRecords []TorrentRecord, torrs []*torrent.Torrent) {
 		fmt.Println("Checking...")
 		_, err = t.CheckAllPieces(filesToCheck)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalln(err)
 		}
 
 		fmt.Println(t)
@@ -104,12 +104,12 @@ func kickOffTorrents(torrentRecords []TorrentRecord, torrs []*torrent.Torrent) {
 		peerList, err := t.GetPeersFromTracker()
 		if err != nil {
 			// TODO: May want to continue and skip problematic torrents/trackers
-			fmt.Println("Error:", err)
+			fmt.Println("Error getting peers:", err)
 			return
 		}
 
-		if err := t.StartConns(peerList, rec.userDesiredConns); err != nil {
-			fmt.Printf("Torrent '%v' failed to start: %v\n", rec.metaInfoFileName, err)
+		if err := t.StartConns(peerList, t.UserDesiredConns); err != nil {
+			fmt.Printf("Torrent '%v' failed to start: %v\n", t.MetaInfoFileName, err)
 			os.Exit(1)
 		}
 	}
@@ -169,7 +169,7 @@ func main() {
 	case "start":
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalln(err)
 		}
 		defer listener.Close()
 
@@ -177,7 +177,7 @@ func main() {
 
 		err = cmd.Start()
 		if err != nil {
-			log.Fatal("start subcommand:", err)
+			log.Fatalln("Start subcommand:", err)
 		}
 
 		// there are two ways we know we're done: either
@@ -307,14 +307,12 @@ func main() {
 	case "parse":
 		metaInfoFileName := os.Args[2]
 		if filepath.Ext(metaInfoFileName) != ".torrent" {
-			fmt.Println(metaInfoFileName, "is not a .torrent file.")
-			os.Exit(1)
+			log.Fatalln(metaInfoFileName, "is not a .torrent file.")
 		}
 
 		_, err := torrent.New(metaInfoFileName, true)
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			log.Fatalln(err)
 		}
 
 	default:
