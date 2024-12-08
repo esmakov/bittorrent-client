@@ -152,15 +152,12 @@ func kickOffTorrents(torrs []*torrent.Torrent) {
 
 		peerList, err := t.GetPeersFromTracker()
 		if err != nil {
-			// TODO: May want to continue and skip problematic torrents/trackers
-			fmt.Println("Error getting peers:", err)
-			return
+			// Continue and skip problematic torrents/trackers
+			t.Logger.Error(err.Error())
+			continue
 		}
 
-		if err := t.StartConns(peerList, t.UserDesiredConns); err != nil {
-			fmt.Printf("Torrent '%v' failed to start: %v\n", t.MetaInfoFileName, err)
-			os.Exit(1)
-		}
+		go t.StartConns(peerList, t.UserDesiredConns)
 	}
 }
 
