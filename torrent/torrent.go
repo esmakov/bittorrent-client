@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	humanize "github.com/dustin/go-humanize"
+
 	"github.com/esmakov/bittorrent-client/hash"
 	"github.com/esmakov/bittorrent-client/messages"
 	"github.com/esmakov/bittorrent-client/parser"
@@ -257,6 +259,7 @@ func clearBitfield(bitfield []byte, pieceNum int) {
 }
 
 func bitfieldContains(bitfield []byte, pieceNum int) bool {
+	// FIXME: Idx 314/314 access
 	b := bitfield[pieceNum/8]
 	bitsFromRight := 7 - (pieceNum % 8)
 	mask := uint8(0x01) << bitsFromRight
@@ -284,7 +287,7 @@ func (t *Torrent) String() string {
 		fmt.Sprintln("--------------Torrent Info--------------"),
 		fmt.Sprintln("Torrent file:", t.MetaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
-		fmt.Sprintln("Total size:", t.totalSize),
+		fmt.Sprintln("Total size:", humanize.Bytes(uint64(t.totalSize))),
 		fmt.Sprintf("Selected %v of %v file(s):\n", numWanted, len(t.Files)),
 	))
 
@@ -426,7 +429,7 @@ const (
 	   to make this obscure and hard to change as it is very rare to be useful to do so." */
 	EFFECTIVE_MAX_PEER_CONNS = 25
 
-	DIAL_TIMEOUT = 2 * time.Second
+	DIAL_TIMEOUT = 3 * time.Second
 
 	// Generally 2 minutes: https://wiki.theory.org/BitTorrentSpecification#keep-alive:_.3Clen.3D0000.3E
 	MESSAGE_TIMEOUT = 5 * time.Second
@@ -468,8 +471,9 @@ func (t *Torrent) GetPeersFromTracker() ([]string, error) {
 
 	peersStr, ok := trackerResponse["peers"].(string)
 	if !ok {
-		return nil, errors.New("No peers for this torrent")
+		return nil, errors.New("No peers for torrent " + t.MetaInfoFileName)
 	}
+
 	return extractCompactPeers(peersStr)
 }
 
@@ -521,6 +525,7 @@ func (t *Torrent) StartConns(peerList []string, userDesiredConns int) error {
 		case e := <-errs:
 			if errors.Is(e, messages.ErrBadInfoHash) || errors.Is(e, ErrBadPieceHash) || errors.Is(e, messages.ErrUnsupportedProtocol) {
 				// TODO: Add to blacklist
+				panic("Misbehaving peer: " + e.Error())
 			}
 
 			t.Logger.Error("Conn dropped: " + e.Error())
@@ -1151,8 +1156,8 @@ func (t *Torrent) notifyPeers(pieceNum uint32, except string) {
 		}
 
 		go func() {
-			conn.Write(messages.CreateHaveMsg(pieceNum))
-			t.Logger.Println("Notifying", conn.RemoteAddr(), "we HAVE piece", pieceNum)
+			conn.Write(messages.CreateHave(pieceNum))
+			t.Logger.Debug("Notifying" + conn.RemoteAddr().String() + "we HAVE piece" + string(pieceNum))
 		}()
 
 		// fmt.Println(t.logbuf.String())
@@ -1238,9 +1243,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 		case <-ctx.Done():
 			return
 		default:
-			// fmt.Println("Nothing to write")
-
-			// Move on and attempt to read
+			// Nothing to write, move on and attempt to read
 		}
 
 		conn.SetReadDeadline(time.Now().Add(CONN_READ_INTERVAL))
@@ -1263,8 +1266,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 		copy(msgBuf[len(msgBuf)-numRead:], tempBuf)
 
 		// Can't subslice msgBuf because it will be cleared
-		copyToParse := slices.Clone(msgBuf)
-		msgList, err := messages.ParseMultiMessage(copyToParse, t.infoHash)
+		msgList, err := messages.ParseMultiMessage(slices.Clone(msgBuf), t.infoHash)
 		if err != nil {
 			errs <- err
 			return

@@ -1,17 +1,24 @@
-A simple CLI bittorrent client
+# Another BitTorrent Client (ABC)
 
 The [mktorrent](github.com/pobrn/mktorrent/) package is required to build test code.
 
-# Usage
-```shell
-go run main <add>|<info>|<parse> <path/to/file.torrent>
+## Installation
+```console
+go install .
+```
+
+## Usage
+```console
+bittorrent-client <run>|<start>|<stop> [<add>|<info>|<parse> <path/to/file.torrent>]
 ```
 
 - The following commands are supported:
-  - add: Add a new torrent and start downloading.
+  - run: Run client in the foreground
+  - start: Run in the background. 
+  - stop: Stop working in the background
+  - add: Add a new torrent and select the files you want
   - info: Display information about the torrent (total size, # of files, etc.)
-  - parse: Display the torrent file structure.
-- <path/to/file.torrent> is the required path to a .torrent file.
+  - parse: Display the .torrent file parse tree
 
 ## Features
 - Parses Bencoded .torrent files and tracker responses
@@ -19,21 +26,18 @@ go run main <add>|<info>|<parse> <path/to/file.torrent>
 - Parses and implements the [peer message protocol](https://wiki.theory.org/BitTorrentSpecification#Messages)
 - Downloads single or multi-file torrents
 - Checks existing data on disk and picks up from where you left off
+- Web UI displays logs and progress
 
 ### Supported BEPs (BitTorrent Enhancement Proposals)
 - 3: Basic BitTorrent protocol (in progress)
 - 23: Tracker Returns Compact Peer Lists
 
 ## TODOs
-- Handle more than one torrent at a time
+- Test more than one torrent at a time
 - Send keepalives
-- Switch over to bytes.Buffer where appropriate
-
 - Blacklist misbehaving peers
-- Specify download directory
-- More interesting bitmask visualization?
+- User-customized paths for downloads, config file
 - Use already-written bencode package to generate .torrent files (instead of pobrn/mktorrent)
-- Set log level (debug, info, errors)
 
 ### Optimizations
 - Better piece download strategies (rarest first)

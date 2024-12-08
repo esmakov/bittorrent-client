@@ -4,6 +4,7 @@ go 1.22.0
 
 require (
 	github.com/charmbracelet/bubbletea v0.25.0
+	github.com/dustin/go-humanize v1.0.1
 	github.com/itchyny/gojq v0.12.16
 )
 

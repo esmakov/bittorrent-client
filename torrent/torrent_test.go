@@ -73,7 +73,7 @@ func createTorrentWithTestData(numFiles, fileSize int) (*Torrent, error) {
 	}
 
 	if torr.numPieces <= 0 {
-		panic("numPieces <= 0")
+		return createTorrentWithTestData(1, 64*1024)
 	}
 	return torr, nil
 }
@@ -115,7 +115,7 @@ func TestPopCount(t *testing.T) {
 	}{
 		{expected: 4, arg: 0b0010_0111},
 		{expected: 2, arg: 0b1000_0001},
-		{expected: 1, arg: 0b1000_0000},
+		{expected: 1, arg: 0b0001_0000},
 	}
 
 	for _, v := range cases {

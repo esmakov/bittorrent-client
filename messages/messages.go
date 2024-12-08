@@ -28,6 +28,7 @@ const (
 	Port
 	Keepalive
 	Handshake
+	// Not part of the BT protocol; used here to mean an incomplete "piece" message split into blocks
 	Fragment
 )
 
@@ -98,24 +99,22 @@ func parseMessage(buf, infoHash []byte) (msg PeerMessage, e error) {
 		}
 	}
 
-	if len(buf) == 4 {
+	statedLen := int(binary.BigEndian.Uint32(buf[:4]))
+
+	if len(buf) == 4 && statedLen == 0 {
 		msg.Kind = Keepalive
 		msg.TotalSize = 4
 		return
 	}
 
-	statedLen := int(binary.BigEndian.Uint32(buf[:4]))
-
 	if statedLen > len(buf) || len(buf) < 4 {
 		// Message needs to be reassembled from this packet and the next
-		// fmt.Printf("Message is %v bytes long but we only have %v so far\n", lenVal, len(buf))
 		msg.Kind = Fragment
 		msg.TotalSize = len(buf)
 		return
 	}
 
-	messageKind := int(buf[4])
-	msg.Kind = messageKinds(messageKind)
+	msg.Kind = messageKinds(int(buf[4]))
 
 	if msg.Kind == Have || msg.Kind == Request || msg.Kind == Piece || msg.Kind == Cancel {
 		msg.PieceNum = int(binary.BigEndian.Uint32(buf[5:9]))
@@ -244,7 +243,7 @@ func CreatePiece(pieceNum, offset uint32, block []byte) []byte {
 
 // have: <len=0005><id=4><piece index>
 // "The have message is fixed length. The payload is the zero-based index of a piece that has just been successfully downloaded and verified via the hash."
-func CreateHaveMsg(pieceNum uint32) []byte {
+func CreateHave(pieceNum uint32) []byte {
 	lengthAndID := []byte{
 		0x00,
 		0x00,

@@ -132,12 +132,11 @@ type GlobalOptions struct {
 	maxPeers int
 }
 
-// Opens the files, checks pieces on disk, gets the swarm information, and starts connecting
 func kickOffTorrents(torrs []*torrent.Torrent) {
 	for _, t := range torrs {
 		filesToCheck, err := t.OpenOrCreateFiles()
 		if err != nil {
-			log.Fatalln(err)
+			t.Logger.Error(err.Error())
 		}
 
 		t.SetWantedBitfield()
@@ -145,7 +144,7 @@ func kickOffTorrents(torrs []*torrent.Torrent) {
 		fmt.Println("Checking...")
 		_, err = t.CheckAllPieces(filesToCheck)
 		if err != nil {
-			log.Fatalln(err)
+			t.Logger.Error(err.Error())
 		}
 
 		fmt.Println(t)
@@ -163,7 +162,7 @@ func kickOffTorrents(torrs []*torrent.Torrent) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Printf("USAGE: %v <start>|<stop>|<add>|<info>|<parse> <path/to/file.torrent>\n", filepath.Base(os.Args[0]))
+		fmt.Printf("USAGE: %v <run>|<start>|<stop>\n\t[<add>|<info>|<parse> <path/to/file.torrent>]\n", filepath.Base(os.Args[0]))
 		os.Exit(1)
 	}
 
@@ -191,7 +190,6 @@ func main() {
 		}
 
 		configBytes, err := io.ReadAll(cf)
-		_ = configBytes
 		if err != nil {
 			log.Fatalln(err)
 		}
@@ -221,7 +219,6 @@ func main() {
 			t.UserDesiredConns = rec.UserDesiredConns
 
 			torrs = append(torrs, t)
-			fmt.Printf("t: %v\n", t)
 		}
 
 		go listenAdminEndpoint(&wg, torrs)
