@@ -386,6 +386,82 @@ func main() {
 
 		// signal client to refresh?
 
+	case "remove":
+		if len(os.Args) < 3 {
+			log.Fatalln("Not enough arguments")
+		}
+
+		metaInfoFileName := os.Args[2]
+		if filepath.Ext(metaInfoFileName) != ".torrent" {
+			fmt.Println(metaInfoFileName, "is not a .torrent file.")
+			os.Exit(1)
+		}
+
+		cf, err := openConfigFile()
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		configBytes, err := io.ReadAll(cf)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		var oldRecs []any
+		if err = json.Unmarshal(configBytes, &oldRecs); err != nil {
+			log.Fatalln("Unmarshal:", err)
+		}
+
+		// Filter out existing record for this torrent
+		q, err := gojq.Parse(".[] | select(.MetaInfoFileName != $s)")
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		code, err := gojq.Compile(q, gojq.WithVariables([]string{"$s"}))
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		var newRecs []any
+		iter := code.Run(oldRecs, metaInfoFileName)
+		for {
+			v, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if err, ok := v.(error); ok {
+				if err, ok := err.(*gojq.HaltError); ok && err.Value() == nil {
+					break
+				}
+				log.Fatalln(err)
+			}
+
+			newRecs = append(newRecs, v)
+		}
+
+		b, err := json.Marshal(newRecs)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		// Overwrite existing contents
+		if err = cf.Truncate(0); err != nil {
+			log.Fatalln(err)
+		}
+
+		_, err = cf.Seek(0, io.SeekStart)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		_, err = cf.Write(b)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		// signal client to refresh?
+
 	case "info":
 		// TODO: Should show running status of any active torrent, not just default-initialized state
 		metaInfoFileName := os.Args[2]
