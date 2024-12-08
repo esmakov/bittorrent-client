@@ -27,28 +27,82 @@ var DefaultAdminListenPort = "2019"
 
 func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 	fmt.Println("Admin dashboard running on port " + DefaultAdminListenPort)
+
 	tmpl := template.Must(template.ParseFiles("status_page_template.html"))
 
-	// TODO: Enforce max size so we don't run out of memory
+	// TODO: Switch to ring buffer
 	var bufs []*bytes.Buffer
 	for _, torr := range torrents {
 		bufs = append(bufs, &torr.Logbuf)
 	}
 
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+
 	http.HandleFunc("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reports := make([]struct {
-			Name string
-			Buf  string
+			Name     string
+			Bitfield []byte
 		}, len(torrents))
 
-		for i, b := range bufs {
-			reports[i].Name = torrents[i].MetaInfoFileName
-			reports[i].Buf = b.String()
+		for i, torr := range torrents {
+			reports[i].Name = torr.MetaInfoFileName
+			reports[i].Bitfield = torr.Bitfield
 		}
 
 		err := tmpl.Execute(w, reports)
 		if err != nil {
 			log.Fatalln(err)
+		}
+	}))
+
+	http.HandleFunc("/events", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		if _, err := w.Write([]byte("data: Connected to SSE\n\n")); err != nil {
+			log.Fatal(err)
+		}
+
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				for _, t := range torrents {
+					msg := struct {
+						Torrent string
+						Body    string
+					}{
+						Torrent: t.MetaInfoFileName,
+						Body:    t.Logbuf.String(),
+					}
+
+					bytes, err := json.Marshal(msg)
+					if err != nil {
+						log.Fatalln(err)
+					}
+
+					if _, err := w.Write([]byte(fmt.Sprintf("data: %s\n\n", bytes))); err != nil {
+						log.Fatalln("Error writing to client:", err)
+					}
+
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+
+					t.Logbuf.Reset()
+				}
+
+			case <-r.Context().Done():
+				fmt.Println("Client disconnected")
+				return
+			}
 		}
 	}))
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"log/slog"
 	"math"
 	"math/rand"
 	"net"
@@ -49,7 +50,7 @@ type Torrent struct {
 	TorrentOptions
 
 	numUploadedBytes       int
-	bitfield               []byte
+	Bitfield               []byte
 	wantedBitfield         []byte
 	Files                  []*TorrentFile
 	lastChecked            time.Time
@@ -69,7 +70,7 @@ type Torrent struct {
 	sync.Mutex
 
 	Logbuf bytes.Buffer
-	Logger log.Logger
+	Logger slog.Logger
 }
 
 type TorrentFile struct {
@@ -179,14 +180,14 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 			totalSize:        totalSize,
 			dir:              dir,
 		},
-		bitfield:               make([]byte, bitfieldLen),
+		Bitfield:               make([]byte, bitfieldLen),
 		wantedBitfield:         make([]byte, bitfieldLen),
 		activeConns:            map[string]net.Conn{},
 		Files:                  files,
 		portForTrackerResponse: getNextFreePort(),
 	}
 
-	t.Logger = *log.New(&t.Logbuf, "DEBUG: ", log.LstdFlags)
+	t.Logger = *slog.New(slog.NewJSONHandler(&t.Logbuf, nil))
 
 	return t, nil
 }
@@ -211,11 +212,11 @@ func (t *Torrent) storeUploaded(n int) {
 
 func (t *Torrent) numBytesDownloaded() int {
 	n := 0
-	for _, b := range t.bitfield {
+	for _, b := range t.Bitfield {
 		n += PopCount(b)
 	}
 
-	if bitfieldContains(t.bitfield, t.numPieces-1) {
+	if bitfieldContains(t.Bitfield, t.numPieces-1) {
 		sizeOfLast := t.totalSize - ((t.numPieces - 1) * t.pieceSize)
 		return (n-1)*t.pieceSize + sizeOfLast
 	}
@@ -226,7 +227,7 @@ func (t *Torrent) numBytesDownloaded() int {
 func (t *Torrent) safeSetBitfield(pieceNum int) {
 	t.Lock()
 	defer t.Unlock()
-	setBitfield(t.bitfield, pieceNum)
+	setBitfield(t.Bitfield, pieceNum)
 }
 
 // Modifies the given bitfield in place, whether it represents the pieces we have, the pieces we want, or the pieces a peer has.
@@ -522,7 +523,7 @@ func (t *Torrent) StartConns(peerList []string, userDesiredConns int) error {
 				// TODO: Add to blacklist
 			}
 
-			log.Println("Conn dropped:", e)
+			t.Logger.Error("Conn dropped: " + e.Error())
 		case <-ctx.Done():
 			fmt.Println("COMPLETED", t.MetaInfoFileName)
 
@@ -609,7 +610,7 @@ func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error
 				continue
 			}
 
-			t.Logger.Println("Incoming conn from", conn.RemoteAddr())
+			t.Logger.Debug("Incoming conn from" + conn.RemoteAddr().String())
 			t.activeConns[conn.RemoteAddr().String()] = conn
 
 			newCtx, newCancel := context.WithCancel(ctx)
@@ -1018,9 +1019,6 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 	)
 
 	for {
-		// fmt.Print(t.Logbuf.String())
-		// t.Logbuf.Reset()
-
 		select {
 		case <-ctx.Done():
 			return
@@ -1033,8 +1031,8 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 			switch msg.Kind {
 			case messages.Handshake:
 				// fmt.Printf("%v has peer id %v\n", peerAddr, string(msg.peerId))
-				outboundMsgs <- messages.CreateBitfield(t.bitfield)
-				t.Logger.Println("Sending BITFIELD to", peerAddr)
+				outboundMsgs <- messages.CreateBitfield(t.Bitfield)
+				t.Logger.Debug("Sending BITFIELD to" + peerAddr)
 			case messages.Request:
 				if connState.am_choking {
 					continue
@@ -1043,7 +1041,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				err := t.handlePieceRequest(msg.PieceNum, msg.BlockSize, outboundMsgs)
 				if err != nil {
 					// TODO: Decide whether to drop conn
-					t.Logger.Println("Error retrieving piece:", err)
+					t.Logger.Debug("Error retrieving piece:" + err.Error())
 				}
 			case messages.Keepalive:
 			case messages.Choke:
@@ -1074,11 +1072,11 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				outboundMsgs <- messages.CreateUnchoke()
 
 				outboundMsgs <- messages.CreateInterested()
-				t.Logger.Println("Sending INTERESTED to", peerAddr)
+				t.Logger.Debug("Sending INTERESTED to" + peerAddr)
 
 				// Request the initial piece
 				outboundMsgs <- messages.CreateRequest(uint32(p.num), uint32(blockOffset), CLIENT_BLOCK_SIZE)
-				t.Logger.Println("Sending REQUEST for piece", p.num, "from", peerAddr)
+				t.Logger.Debug("Sending REQUEST for piece" + string(p.num) + "from" + peerAddr)
 			case messages.Piece:
 				p.storeBlockIntoPiece(msg, currBlockSize)
 				blockOffset += CLIENT_BLOCK_SIZE
@@ -1086,7 +1084,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				currPieceSize = p.ActualSize(t)
 
 				if blockOffset == currPieceSize {
-					t.Logger.Println("CHECKING piece", p.num)
+					t.Logger.Debug("CHECKING piece" + string(p.num))
 					correct, err := t.checkPieceHash(p)
 					if err != nil {
 						errs <- err
@@ -1105,7 +1103,6 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 					}
 
 					t.safeSetBitfield(msg.PieceNum)
-					fmt.Printf("%b\n", t.bitfield)
 
 					t.notifyPeers(uint32(p.num), peerAddr)
 
@@ -1131,7 +1128,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 						currBlockSize = remaining
 					}
 
-					t.Logger.Println(blockOffset, "/", currPieceSize, "bytes")
+					t.Logger.Debug(string(blockOffset) + "/" + string(currPieceSize) + "bytes")
 				}
 
 				// Check if we should request another piece
@@ -1165,7 +1162,7 @@ func (t *Torrent) notifyPeers(pieceNum uint32, except string) {
 // Retrieves and sends data for a particular piece block by block.
 // If we are requested to provide a piece we don't have, choke the peer making the request.
 func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs chan<- []byte) error {
-	if !bitfieldContains(t.bitfield, pieceNum) {
+	if !bitfieldContains(t.Bitfield, pieceNum) {
 		outboundMsgs <- messages.CreateChoke()
 		return ErrPieceNotOnDisk
 	}
@@ -1209,7 +1206,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 
 	go t.chooseResponse(peer, outboundMsgs, parsedMessages, errs, ctx, cancel)
 
-	t.Logger.Println("CONNECTED to peer", peer)
+	t.Logger.Debug("CONNECTED to peer" + peer)
 
 	handshakeMsg := messages.CreateHandshake(t.infoHash, []byte(CLIENT_PEER_ID))
 	if _, err := conn.Write(handshakeMsg); err != nil {
@@ -1228,7 +1225,6 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 		select {
 		case msg, open := <-outboundMsgs:
 			if !open {
-				// log.Println("chooseResponse signaled to drop connection to", peer)
 				return
 			}
 
@@ -1278,7 +1274,7 @@ func (t *Torrent) handleConn(ctx context.Context, cancel context.CancelFunc, con
 		for _, msg := range msgList {
 			parsedMessages <- msg
 			if msg.Kind != messages.Fragment {
-				t.Logger.Println(conn.RemoteAddr(), "sent a", msg.Kind)
+				t.Logger.Debug(conn.RemoteAddr().String() + "sent a" + msg.Kind.String())
 			}
 
 			if msg.Kind != messages.Fragment {
@@ -1343,7 +1339,7 @@ func (t *Torrent) selectNextPieceSeq(currPieceNum int, peerBitfield []byte) (int
 
 		if bitfieldContains(peerBitfield, nextPieceNum) &&
 			bitfieldContains(t.wantedBitfield, nextPieceNum) &&
-			!bitfieldContains(t.bitfield, nextPieceNum) {
+			!bitfieldContains(t.Bitfield, nextPieceNum) {
 			return nextPieceNum, nil
 		}
 		nextPieceNum++

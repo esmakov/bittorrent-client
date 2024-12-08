@@ -145,12 +145,12 @@ func TestCheckAllPieces(t *testing.T) {
 	}
 
 	n := 0
-	for _, b := range torr.bitfield {
+	for _, b := range torr.Bitfield {
 		n += PopCount(b)
 	}
 
 	if !torr.IsComplete() {
-		t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", n, torr.numPieces, torr.bitfield)
+		t.Fatalf("Expected all, but only %v/%v pieces were verified: %b", n, torr.numPieces, torr.Bitfield)
 	}
 
 	if err := os.RemoveAll(torr.dir); err != nil {
@@ -322,11 +322,11 @@ func TestSelectNextPiece(t *testing.T) {
 		expected = 0
 	}
 
-	peerBitfield := make([]byte, len(torr.bitfield))
+	peerBitfield := make([]byte, len(torr.Bitfield))
 	for i := range len(peerBitfield) {
 		// Our pretend peer has all the pieces
 		peerBitfield[i] |= 0xFF
-		torr.bitfield[i] &= 0x00
+		torr.Bitfield[i] &= 0x00
 	}
 
 	actual, err := torr.selectNextPieceSeq(p.num, peerBitfield)
