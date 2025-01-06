@@ -833,107 +833,75 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 	return nil
 }
 
-// Note: Assumes the piece number is set correctly (e.g. not in an unwanted file)
+// Note: Assumes the piece number is set correctly and that iterating over
+// t.Files happens in the order that they are defined in the metainfo file.
 func (t *Torrent) writePieceToDisk(p *pieceData) error {
-	currPieceSize := t.pieceSize
-	if p.num == t.numPieces-1 {
-		currPieceSize = t.totalSize - p.num*t.pieceSize
-	}
+	currPieceSize := p.ActualSize(t)
 
 	// All piece indices are relative to the "stream" of pieces and may cross file boundaries
-	pieceStartIdx := int64(p.num * t.pieceSize)
-	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
-
-	if len(t.Files) == 1 {
-		_, err := t.Files[0].fd.WriteAt(p.data[:currPieceSize], pieceStartIdx)
-		return err
-	}
+	pieceStartByte := int64(p.num * t.pieceSize)
+	pieceEndByte := pieceStartByte + int64(currPieceSize)
 
 	var (
-		fileStartIdx       = int64(0)
+		fileStartByte      = int64(0)
 		remainingPieceSize = currPieceSize
-		startWriteAt       = 0
+		startWriteFrom     = 0
 	)
 
 	for _, currFile := range t.Files {
-		fileEndIdx := fileStartIdx + currFile.finalSize
+		fileEndByte := fileStartByte + currFile.finalSize
 
-		if pieceStartIdx >= fileEndIdx {
-			fileStartIdx += currFile.finalSize
+		if pieceStartByte >= fileEndByte {
+			fileStartByte += currFile.finalSize
 			continue
 		}
 
-		fileInfo, err := os.Stat(currFile.Path)
-		if err != nil {
-			return err
+		pieceOffsetIntoFile := pieceStartByte - fileStartByte
+
+		if pieceStartByte >= fileStartByte && pieceEndByte <= fileEndByte {
+			// Piece is bounded by file, only one write
+			if _, err := currFile.fd.WriteAt(p.data[:currPieceSize], pieceOffsetIntoFile); err != nil {
+				return err
+			}
 		}
 
-		for {
-			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
-			bytesFromEOF := fileEndIdx - pieceStartIdx
+		// Everything below handles pieces that cross file boundaries
 
-			if pieceOffsetIntoFile < 0 {
-				pieceOffsetIntoFile = 0
+		if pieceStartByte >= fileStartByte && pieceEndByte > fileEndByte {
+			// Need to write until the end of this file and continue in the next
+
+			bytesFromEOF := fileEndByte - pieceStartByte
+			if _, err := currFile.fd.WriteAt(p.data[:bytesFromEOF], pieceOffsetIntoFile); err != nil {
+				return err
 			}
 
-			if fileInfo.Size() >= currFile.finalSize {
-				if pieceOffsetIntoFile >= currFile.finalSize {
-					panic("Unreachable")
-				}
+			remainingPieceSize -= int(bytesFromEOF)
+			startWriteFrom += int(bytesFromEOF)
+			fileStartByte += currFile.finalSize
+			continue
+		}
+
+		if remainingPieceSize < currPieceSize {
+			writeSize := min(int(currFile.finalSize), remainingPieceSize)
+			// Since we're continuing a piece from a previous file, offset = 0
+			if _, err := currFile.fd.WriteAt(p.data[startWriteFrom:startWriteFrom+writeSize], 0); err != nil {
+				return err
 			}
 
-			boundedByFile := pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx
-			crossesFileBoundary := pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx
+			remainingPieceSize -= writeSize
+			startWriteFrom += writeSize
 
-			if boundedByFile || remainingPieceSize < currPieceSize {
-				if remainingPieceSize < currPieceSize {
-					writeSize := min(int(currFile.finalSize), remainingPieceSize)
-					if pieceOffsetIntoFile != 0 {
-						panic("Interesting if this happens, maybe we skipped a piece belonging to a file we didn't want?")
-					}
-					if _, err := currFile.fd.WriteAt(p.data[startWriteAt:startWriteAt+writeSize], 0); err != nil {
-						return err
-					}
-					remainingPieceSize -= writeSize
-					startWriteAt += writeSize
-					if remainingPieceSize < 0 {
-						panic("remainingPieceSize < 0")
-					}
-
-					if remainingPieceSize > 0 {
-						// Move on to yet another (at least a third) file to finish this piece
-						fileStartIdx += currFile.finalSize
-						break
-					}
-
-					if startWriteAt != currPieceSize {
-						panic("Piece fragments do not add up to a whole piece")
-					}
-
-				} else {
-					if _, err := currFile.fd.WriteAt(p.data[:currPieceSize], pieceOffsetIntoFile); err != nil {
-						return err
-					}
-				}
-
-				return nil
-			} else if crossesFileBoundary {
-				if pieceStartIdx < fileStartIdx {
-					panic("bytesFromEnd will be calculated too high")
-				}
-
-				// TODO: Shouldn't have to subslice as long as the caller calls NewPieceData with correct size
-				if _, err := currFile.fd.WriteAt(p.data[:bytesFromEOF], pieceOffsetIntoFile); err != nil {
-					return err
-				}
-
-				remainingPieceSize -= int(bytesFromEOF)
-				startWriteAt += int(bytesFromEOF)
-				fileStartIdx += currFile.finalSize
-				break
-			} else {
-				panic("Unreachable")
+			if remainingPieceSize > 0 {
+				// Move on to yet another (at least a third) file to finish this piece
+				fileStartByte += currFile.finalSize
+				continue
 			}
+
+			if startWriteFrom != currPieceSize {
+				panic("Entire piece should have been written by now!")
+			}
+
+			return nil
 		}
 	}
 
