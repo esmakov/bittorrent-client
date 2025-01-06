@@ -362,15 +362,13 @@ func PopCount(b byte) int {
 }
 
 /*
-Opens the TorrentFiles' descriptors for writing and returns the ones that have been modified since the torrent was last checked.
-
-FIXME: Since a new torrent instance is created and destroyed each run, the lastChecked field doesn't persist
-and we aren't able to save time by not checking files. As a result, all the TorrentFiles are returned.
+Creates and initializes file descriptors for all files, even unwanted ones,
+in case a piece crosses file boundaries and needs to write to/read from the subsequent file.
 
 NOTE: Prior to calling this, torrentFiles have a nil file descriptior.
 */
-func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
-	var filesToCheck []*TorrentFile
+func (t *Torrent) CreateFiles() ([]*TorrentFile, error) {
+	var torrentFiles []*TorrentFile
 
 	if t.dir != "" {
 		if err := os.Mkdir(t.dir, 0o766); err != nil {
@@ -381,34 +379,20 @@ func (t *Torrent) OpenOrCreateFiles() ([]*TorrentFile, error) {
 	}
 
 	for _, file := range t.Files {
-		if t.dir != "" {
+		// Prepend the directory if it hasn't been done already
+		if t.dir != "" && filepath.Base(file.Path) == file.Path {
 			file.Path = filepath.Join(t.dir, file.Path)
 		}
 
-		fd, err := os.OpenFile(file.Path, os.O_RDWR, 0)
-		if errors.Is(err, fs.ErrNotExist) {
-			fd, err = os.Create(file.Path)
-			if err != nil {
-				return nil, err
-			}
-			file.fd = fd
-		} else if err != nil {
-			return nil, err
-		}
-
-		file.fd = fd
-
-		info, err := os.Stat(file.fd.Name())
+		fd, err := os.OpenFile(file.Path, os.O_RDWR|os.O_CREATE, 0o766)
 		if err != nil {
 			return nil, err
 		}
 
-		if info.ModTime().After(t.lastChecked) {
-			filesToCheck = append(filesToCheck, file)
-		}
+		file.fd = fd
 	}
 
-	return filesToCheck, nil
+	return torrentFiles, nil
 }
 
 const (
