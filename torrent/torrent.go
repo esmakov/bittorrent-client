@@ -736,45 +736,38 @@ func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
 	return existingPieces, nil
 }
 
-// Note: Assumes the piece number is initialized and in a file we want
+// Note: Assumes the piece number is initialized
 func (t *Torrent) readPieceFromDisk(p *pieceData) error {
-	currPieceSize := t.pieceSize
-	if p.num == t.numPieces-1 {
-		currPieceSize = t.totalSize - p.num*t.pieceSize
-	}
+	currPieceSize := p.ActualSize(t)
 
 	// All indices are relative to the "stream" of pieces and may cross file boundaries
-	pieceStartIdx := int64(p.num * t.pieceSize)
-	pieceEndIdx := pieceStartIdx + int64(currPieceSize)
+	pieceStartByte := int64(p.num * t.pieceSize)
+	pieceEndByte := pieceStartByte + int64(currPieceSize)
 
 	if len(t.Files) == 1 {
-		if t.Files[0].fd == nil {
-			return errors.New("Nil file descriptor")
-		}
-
 		fileInfo, err := os.Stat(t.Files[0].Path)
 		if err != nil {
 			return err
 		}
 
-		if pieceStartIdx >= fileInfo.Size() {
+		if pieceStartByte >= fileInfo.Size() {
 			return ErrPieceNotOnDisk
 		}
-		_, err = t.Files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartIdx)
+		_, err = t.Files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartByte)
 		return err
 	}
 
 	var (
-		fileStartIdx       = int64(0)
+		fileStartByte      = int64(0)
 		remainingPieceSize = currPieceSize
 		startReadAt        = 0
 	)
 
 	for _, currFile := range t.Files {
-		fileEndIdx := fileStartIdx + currFile.finalSize
+		fileEndByte := fileStartByte + currFile.finalSize
 
-		if !currFile.Wanted || pieceStartIdx >= fileEndIdx {
-			fileStartIdx += currFile.finalSize
+		if pieceStartByte >= fileEndByte {
+			fileStartByte += currFile.finalSize
 			continue
 		}
 
@@ -784,69 +777,56 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 		}
 
 		for {
-			pieceOffsetIntoFile := pieceStartIdx - fileStartIdx
-			bytesFromEOF := fileEndIdx - pieceStartIdx
+			pieceOffsetIntoFile := pieceStartByte - fileStartByte
+			bytesFromEOF := fileEndByte - pieceStartByte
 
 			if fileInfo.Size() < currFile.finalSize {
 				if pieceOffsetIntoFile >= fileInfo.Size() {
+					// We don't have this piece yet
 					return ErrPieceNotOnDisk
-				}
-			} else {
-				if pieceOffsetIntoFile >= currFile.finalSize {
-					panic("Unreachable")
 				}
 			}
 
-			boundedByFile := pieceStartIdx >= fileStartIdx && pieceEndIdx <= fileEndIdx
-			crossesFileBoundary := pieceStartIdx >= fileStartIdx && pieceEndIdx > fileEndIdx
+			if pieceStartByte >= fileStartByte && pieceEndByte <= fileEndByte {
+				// Piece is bounded by file, one read only
+				_, err := currFile.fd.ReadAt(p.data[:currPieceSize], pieceOffsetIntoFile)
+				return err
+			}
 
-			if boundedByFile || remainingPieceSize < currPieceSize {
-				if remainingPieceSize < currPieceSize {
-					readSize := min(int(currFile.finalSize), remainingPieceSize)
-					if _, err := currFile.fd.ReadAt(p.data[startReadAt:startReadAt+readSize], 0); err != nil {
-						return err
-					}
-
-					remainingPieceSize -= readSize
-					startReadAt += readSize
-					if remainingPieceSize < 0 {
-						panic("Unreachable: remainingPieceSize < 0")
-					}
-
-					if remainingPieceSize > 0 {
-						// Move on to yet another (at least a third) file to finish this piece
-						fileStartIdx += currFile.finalSize
-						break
-					}
-
-					if startReadAt != currPieceSize {
-						panic("Unreachable: Piece fragments do not add up to a whole piece")
-					}
-
-				} else {
-					if _, err := currFile.fd.ReadAt(p.data[:currPieceSize], pieceOffsetIntoFile); err != nil {
-						return err
-					}
-				}
-
-				return nil
-			} else if crossesFileBoundary {
-				if pieceStartIdx < fileStartIdx {
-					panic("bytesFromEnd will be calculated too high")
-				}
-
-				// TODO: Shouldn't have to subslice as long as the caller initializes the pieceData with correct size
+			if pieceStartByte >= fileStartByte && pieceEndByte > fileEndByte {
+				// Start read in this file and continue in the next
 				if _, err := currFile.fd.ReadAt(p.data[:bytesFromEOF], pieceOffsetIntoFile); err != nil {
 					return err
 				}
 
 				remainingPieceSize -= int(bytesFromEOF)
 				startReadAt += int(bytesFromEOF)
-				fileStartIdx += currFile.finalSize
+				fileStartByte += currFile.finalSize
 				break
-			} else {
-				panic("Unreachable")
 			}
+
+			if remainingPieceSize < currPieceSize {
+				readSize := min(int(currFile.finalSize), remainingPieceSize)
+				if _, err := currFile.fd.ReadAt(p.data[startReadAt:startReadAt+readSize], 0); err != nil {
+					return err
+				}
+
+				remainingPieceSize -= readSize
+				startReadAt += readSize
+
+				if remainingPieceSize > 0 {
+					// Move on to yet another (at least a third) file to finish this piece
+					fileStartByte += currFile.finalSize
+					break
+				}
+
+				if startReadAt != currPieceSize {
+					panic("Unreachable: Piece fragments do not add up to a whole piece")
+				}
+
+				return nil
+			}
+
 		}
 	}
 
