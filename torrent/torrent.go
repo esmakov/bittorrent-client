@@ -1033,15 +1033,16 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 						return
 					}
 
-					// TODO: Send all connected peers a 'have' msg when a piece is downloaded
-					if err = t.writePieceToDisk(p); err != nil {
+					// Intentionally blocking on the disk write here before we
+					// request another piece
+					if err := t.writePieceToDisk(p); err != nil {
 						errs <- err
 						return
 					}
 
 					t.safeSetBitfield(msg.PieceNum)
 
-					t.notifyPeers(uint32(p.num), peerAddr)
+					t.notifyPeers(uint32(p.num), peerAddr, errs)
 
 					if t.IsComplete() {
 						cancel()
@@ -1081,18 +1082,20 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 	}
 }
 
-func (t *Torrent) notifyPeers(pieceNum uint32, except string) {
+// Asynchronously writes HAVE messages to all connected peers
+func (t *Torrent) notifyPeers(pieceNum uint32, except string, errs chan<- error) {
 	for _, conn := range t.activeConns {
 		if conn.RemoteAddr().String() == except {
 			continue
 		}
 
 		go func() {
-			conn.Write(messages.CreateHave(pieceNum))
-			t.Logger.Debug("Notifying" + conn.RemoteAddr().String() + "we HAVE piece" + string(pieceNum))
+			if _, err := conn.Write(messages.CreateHave(pieceNum)); err != nil {
+				errs <- err
+				return
+			}
+			t.Logger.Debug(fmt.Sprintf("Successfully notified %v we HAVE piece %v", conn.RemoteAddr().String(), pieceNum))
 		}()
-
-		// fmt.Println(t.logbuf.String())
 	}
 }
 
@@ -1110,6 +1113,7 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 	}
 
 	p := newPieceData(currPieceSize)
+	p.num = pieceNum
 	t.readPieceFromDisk(p)
 	blocks := p.splitIntoBlocks(t, blockSize)
 
