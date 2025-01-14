@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"log/slog"
 	"math"
@@ -206,7 +205,7 @@ func (t *Torrent) storeLeechers(n int) {
 	t.leechers = n
 }
 
-func (t *Torrent) storeUploaded(n int) {
+func (t *Torrent) storeUploadedBytes(n int) {
 	t.Lock()
 	defer t.Unlock()
 	t.numUploadedBytes = n
@@ -224,6 +223,15 @@ func (t *Torrent) numBytesDownloaded() int {
 	}
 
 	return n * t.numPieces
+}
+
+func PopCount(b byte) int {
+	count := 0
+	for b > 0 {
+		count += int(b & 1)
+		b >>= 1
+	}
+	return count
 }
 
 func (t *Torrent) safeSetBitfield(pieceNum int) {
@@ -350,15 +358,6 @@ func (t *Torrent) SetWantedBitfield() {
 			setBitfield(t.wantedBitfield, i)
 		}
 	}
-}
-
-func PopCount(b byte) int {
-	count := 0
-	for b > 0 {
-		count += int(b & 1)
-		b >>= 1
-	}
-	return count
 }
 
 /*
@@ -682,7 +681,7 @@ Also checks the number of pieces downloaded so far, which is used to determine i
 
 TODO: Benchmark a multithreaded version
 */
-func (t *Torrent) CheckAllPieces(files []*TorrentFile) ([]int, error) {
+func (t *Torrent) CheckAllPieces() ([]int, error) {
 	p := newPieceData(t.pieceSize)
 	var existingPieces []int
 
@@ -938,9 +937,13 @@ func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
 }
 
 /*
-chooseResponse runs for the lifetime of a connection, receiving parsed messages from the handleConn goroutine for a particular peer connection. It sends back a byte response on outboundMsgs to be written.
+chooseResponse runs for the lifetime of a connection, receiving parsed messages from the
+handleConn goroutine for a particular peer connection. Sends back a byte response on outboundMsgs to be written.
 
-It also verifies the piece hash and calls writePieceToDisk if correct.
+Stores each chunk in a buffer until a whole piece is ready to be flushed to disk.
+Will block while serving read requests or writing pieces.
+
+TODO: Own responsibility of writing to the connection?
 */
 func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, parsedMsgs <-chan messages.PeerMessage, errs chan<- error, ctx context.Context, cancel context.CancelFunc) {
 	defer close(outboundMsgs)
@@ -981,6 +984,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 					t.Logger.Debug("Error retrieving piece:" + err.Error())
 				}
 			case messages.Keepalive:
+				// TODO: Reset read timer in handleConn
 			case messages.Choke:
 				connState.peer_choking = true
 			case messages.Unchoke:
@@ -1013,7 +1017,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 
 				// Request the initial piece
 				outboundMsgs <- messages.CreateRequest(uint32(p.num), uint32(blockOffset), CLIENT_BLOCK_SIZE)
-				t.Logger.Debug("Sending REQUEST for piece" + string(p.num) + "from" + peerAddr)
+				t.Logger.Debug(fmt.Sprintf("Sending REQUEST for piece %v from %v", p.num, peerAddr))
 			case messages.Piece:
 				p.storeBlockIntoPiece(msg, currBlockSize)
 				blockOffset += CLIENT_BLOCK_SIZE
@@ -1021,7 +1025,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				currPieceSize = p.ActualSize(t)
 
 				if blockOffset == currPieceSize {
-					t.Logger.Debug("CHECKING piece" + string(p.num))
+					t.Logger.Debug(fmt.Sprintf("CHECKING piece %v", p.num))
 					correct, err := t.checkPieceHash(p)
 					if err != nil {
 						errs <- err
@@ -1066,7 +1070,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 						currBlockSize = remaining
 					}
 
-					t.Logger.Debug(string(blockOffset) + "/" + string(currPieceSize) + "bytes")
+					t.Logger.Debug(fmt.Sprintf("%v/%v bytes", blockOffset, currPieceSize))
 				}
 
 				// Check if we should request another piece
@@ -1123,7 +1127,7 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 		offset += blockSize
 	}
 
-	t.storeUploaded(t.numUploadedBytes + currPieceSize)
+	t.storeUploadedBytes(t.numUploadedBytes + currPieceSize)
 
 	return nil
 }

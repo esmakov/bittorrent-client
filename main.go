@@ -134,15 +134,14 @@ type GlobalOptions struct {
 
 func kickOffTorrents(torrs []*torrent.Torrent) {
 	for _, t := range torrs {
-		filesToCheck, err := t.OpenOrCreateFiles()
-		if err != nil {
+		if _, err := t.CreateFiles(); err != nil {
 			t.Logger.Error(err.Error())
 		}
 
 		t.SetWantedBitfield()
 
 		fmt.Println("Checking...")
-		_, err = t.CheckAllPieces(filesToCheck)
+		_, err := t.CheckAllPieces()
 		if err != nil {
 			t.Logger.Error(err.Error())
 		}
