@@ -191,6 +191,21 @@ func main() {
 			log.Fatalln(err)
 		}
 
+		if len(configBytes) == 0 {
+			// Initialize with top level array
+			_, err := cf.WriteString("[]")
+			if err != nil {
+				log.Fatalln(err)
+			}
+
+			// Move the file cursor back
+			_, err = cf.Seek(0, io.SeekStart)
+			if err != nil {
+				log.Fatalln(err)
+			}
+
+		}
+
 		var records []TorrentRecord
 		err = json.Unmarshal(configBytes, &records)
 		if err != nil {
