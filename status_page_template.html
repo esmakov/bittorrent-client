@@ -14,26 +14,32 @@
     <main class="flex flex-col items-center">
         <h1 class="text-2xl p-8">Another BitTorrent Client</h1>
         <div class="flex gap-8">
-            {{range .}}
-            <section class="flex flex-col">
-                <h2 class="text-lg">{{.Name}}</h2>
-                <textarea class="w-full h-36" style="overflow-y: auto"></textarea>
-                <div>
-                    {{range .Bitfield}}
+                {{ if len . }}
 
-                    {{if .}}
-                    <div class="h-[1px] bg-green-200">
+                {{range .}}
+                <section class="flex flex-col">
+                    <h2 class="text-lg">{{.Name}}</h2>
+                    <textarea class="w-full h-36" style="overflow-y: auto"></textarea>
+                    <div>
+                        {{range .Bitfield}}
+
+                        {{if .}}
+                        <div class="h-[1px] bg-green-200">
+                        </div>
+
+                        {{else}}
+                        <div class="h-[1px]">
+                        </div>
+                        {{end}}
+
+                        {{end}}
                     </div>
+                </section>
+                {{end}}
 
-                    {{else}}
-                    <div class="h-[1px]">
-                    </div>
-                    {{end}}
-
-                    {{end}}
-                </div>
-            </section>
-            {{end}}
+                {{else}}
+                <h2>No torrents</h2>
+                {{end}}
         </div>
 
         <div class="events"></div>
