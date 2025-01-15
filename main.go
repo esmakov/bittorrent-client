@@ -68,6 +68,7 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 			f.Flush()
 		}
 
+		// TODO: Replace timer with a channel
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
@@ -81,6 +82,10 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 					}{
 						Torrent: t.MetaInfoFileName,
 						Body:    t.Logbuf.String(),
+					}
+
+					if len(msg.Body) == 0 {
+						continue
 					}
 
 					bytes, err := json.Marshal(msg)

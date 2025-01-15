@@ -2,8 +2,18 @@ const eventSource = new EventSource('/events');
 const sections = document.querySelectorAll("section");
 
 eventSource.onmessage = function(event) {
-    const data = JSON.parse(event.data);
-    const { level, time, msg } = JSON.parse(data.Body);
+    let data;
+    let level, time, msg;
+
+    try {
+        data = JSON.parse(event.data);
+        level, time, msg = JSON.parse(data.Body);
+    } catch (e) {
+        console.error("Parse:", e);
+        console.debug("event.data:", event.data)
+        console.debug("data:", data)
+        return
+    }
 
     const e = Array.from(sections).filter(s => s.querySelector("h2").textContent == data.Torrent)[0].querySelector("textarea");
     e.value += level + time + msg + "\n";
