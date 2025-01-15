@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -29,12 +28,6 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 	fmt.Println("Admin dashboard running on port " + DefaultAdminListenPort)
 
 	tmpl := template.Must(template.ParseFiles("status_page_template.html"))
-
-	// TODO: Switch to ring buffer
-	var bufs []*bytes.Buffer
-	for _, torr := range torrents {
-		bufs = append(bufs, &torr.Logbuf)
-	}
 
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 
