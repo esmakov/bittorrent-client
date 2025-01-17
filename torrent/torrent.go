@@ -185,7 +185,7 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		wantedBitfield:         make([]byte, bitfieldLen),
 		activeConns:            map[string]net.Conn{},
 		Files:                  files,
-		portForTrackerResponse: getNextFreePort(),
+		portForTrackerResponse: ":8080",
 	}
 
 	t.Logger = *slog.New(slog.NewJSONHandler(&t.Logbuf, nil))
@@ -557,14 +557,14 @@ func (t *Torrent) StartConns(peerList []string, userDesiredConns int) error {
 // Tries to acquire a lock on the Torrent to keep its peer count accurate.
 
 func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error) {
-	listenAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprint(":", t.portForTrackerResponse))
+	listenAddr, err := net.ResolveTCPAddr("tcp", getNextFreePort())
 	if err != nil {
-		log.Println(err)
+		panic(err)
 	}
 
 	listener, err := net.ListenTCP("tcp", listenAddr)
 	if err != nil {
-		log.Println(err)
+		panic(err)
 	}
 	defer listener.Close()
 
@@ -587,9 +587,8 @@ func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error
 			}
 
 			if err := listener.SetDeadline(time.Now().Add(CONN_READ_INTERVAL)); err != nil {
-				errs <- err
 				t.Unlock()
-				return
+				panic(err)
 			}
 
 			conn, err := listener.AcceptTCP()
