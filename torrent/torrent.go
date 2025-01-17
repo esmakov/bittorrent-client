@@ -1053,8 +1053,13 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 					t.notifyPeers(uint32(p.num), peerAddr, errs)
 
 					if t.IsComplete() {
-						cancel()
-						return
+						t.Logger.Info("COMPLETED: " + t.MetaInfoFileName)
+
+						// NOTE: Tracker only expects this once
+						// Make sure this doesn't happen if the download started at 100% already
+						t.sendTrackerMessage(completedEvent)
+						// TODO: Set status to Seeding
+						continue
 					}
 
 					// Reset for next piece
