@@ -1312,5 +1312,5 @@ func newConnState() *connState {
 
 // TODO: Do we need more than one?
 func getNextFreePort() string {
-	return "6881"
+	return ":6881"
 }
