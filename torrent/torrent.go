@@ -503,21 +503,18 @@ func (t *Torrent) StartConns(peerList []string, userDesiredConns int) error {
 
 	go t.acceptConns(ctx, maxPeers, errs)
 
+	// TODO: Signal when more connections can be made using a channel, instead of busy looping
 	for {
 		select {
 		case e := <-errs:
 			if errors.Is(e, messages.ErrBadInfoHash) || errors.Is(e, ErrBadPieceHash) || errors.Is(e, messages.ErrUnsupportedProtocol) {
 				// TODO: Add to blacklist
-				panic("Misbehaving peer: " + e.Error())
+				t.Logger.Error("Misbehaving peer: " + e.Error())
+				return e
 			}
 
 			t.Logger.Error("Conn dropped: " + e.Error())
 		case <-ctx.Done():
-			fmt.Println("COMPLETED", t.MetaInfoFileName)
-
-			// NOTE: Tracker only expects this once
-			// Make sure this doesn't happen if the download started at 100% already
-			t.sendTrackerMessage(completedEvent)
 			return nil
 		default:
 			// Try to make more connections
@@ -534,13 +531,21 @@ func (t *Torrent) StartConns(peerList []string, userDesiredConns int) error {
 
 			conn, err := net.DialTimeout("tcp", getRandPeer(peerList), DIAL_TIMEOUT)
 			if err != nil {
-				log.Println(err)
+				if !errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Logger.Error("StartConns: " + err.Error())
+				}
 				t.Unlock()
+				// Don't return here because the context will be closed
+				// and existing connection handlers will be canceled
 				continue
 			}
 
 			t.activeConns[conn.RemoteAddr().String()] = conn
-			go t.handleConn(ctx, cancel, conn, errs)
+			// Use a new child ctx so that errors related to handling of
+			// individual connections don't cancel this goroutine
+			childCtx, childCancel := context.WithCancel(ctx)
+			go t.handleConn(childCtx, childCancel, conn, errs)
+
 			t.Unlock()
 		}
 	}
@@ -568,7 +573,6 @@ func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("INFO: Torrent", filepath.Base(t.MetaInfoFileName), "complete, no longer accepting conns")
 			return
 		default:
 			t.Lock()
@@ -601,6 +605,7 @@ func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error
 			t.Logger.Debug("Incoming conn from" + conn.RemoteAddr().String())
 			t.activeConns[conn.RemoteAddr().String()] = conn
 
+			// New context for same reason as in StartConns
 			newCtx, newCancel := context.WithCancel(ctx)
 			go t.handleConn(newCtx, newCancel, conn, errs)
 
