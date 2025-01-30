@@ -34,9 +34,9 @@ type TorrentMetaInfo struct {
 	trackerHostname  string
 	comment          string
 	infoHash         []byte
-	isPrivate        bool
+	IsPrivate        bool
 	piecesStr        string
-	totalSize        int
+	TotalSize        int
 	pieceSize        int // Size of all but the last piece
 	numPieces        int
 	dir              string
@@ -50,7 +50,7 @@ type Torrent struct {
 	TorrentMetaInfo
 	TorrentOptions
 
-	numUploadedBytes       int
+	NumUploadedBytes       int
 	Bitfield               []byte
 	wantedBitfield         []byte
 	Files                  []*TorrentFile
@@ -174,11 +174,11 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 			trackerHostname:  announce,
 			infoHash:         infoHash,
 			comment:          comment,
-			isPrivate:        isPrivate == 1,
+			IsPrivate:        isPrivate == 1,
 			piecesStr:        bPieces,
 			pieceSize:        bPieceLength,
 			numPieces:        numPieces,
-			totalSize:        totalSize,
+			TotalSize:        totalSize,
 			dir:              dir,
 		},
 		Bitfield:               make([]byte, bitfieldLen),
@@ -208,17 +208,17 @@ func (t *Torrent) storeLeechers(n int) {
 func (t *Torrent) storeUploadedBytes(n int) {
 	t.Lock()
 	defer t.Unlock()
-	t.numUploadedBytes = n
+	t.NumUploadedBytes = n
 }
 
-func (t *Torrent) numBytesDownloaded() int {
+func (t *Torrent) NumBytesDownloaded() int {
 	n := 0
 	for _, b := range t.Bitfield {
 		n += PopCount(b)
 	}
 
 	if bitfieldContains(t.Bitfield, t.numPieces-1) {
-		sizeOfLast := t.totalSize - ((t.numPieces - 1) * t.pieceSize)
+		sizeOfLast := t.TotalSize - ((t.numPieces - 1) * t.pieceSize)
 		return (n-1)*t.pieceSize + sizeOfLast
 	}
 
@@ -275,12 +275,12 @@ func bitfieldContains(bitfield []byte, pieceNum int) bool {
 }
 
 func (t *Torrent) IsComplete() bool {
-	return t.numBytesDownloaded() == t.totalSize
+	return t.NumBytesDownloaded() == t.TotalSize
 }
 
 func (t *Torrent) String() string {
 	sb := strings.Builder{}
-	if t.isPrivate {
+	if t.IsPrivate {
 		sb.WriteString(fmt.Sprint("PRIVATE TORRENT"))
 	}
 
@@ -295,7 +295,7 @@ func (t *Torrent) String() string {
 		fmt.Sprintln("--------------Torrent Info--------------"),
 		fmt.Sprintln("Torrent file:", t.MetaInfoFileName),
 		fmt.Sprintln("Tracker:", t.trackerHostname),
-		fmt.Sprintln("Total size:", humanize.Bytes(uint64(t.totalSize))),
+		fmt.Sprintln("Total size:", humanize.Bytes(uint64(t.TotalSize))),
 		fmt.Sprintf("Selected %v of %v file(s):\n", numWanted, len(t.Files)),
 	))
 
@@ -429,7 +429,7 @@ const (
 func (t *Torrent) GetPeersFromTracker() ([]string, error) {
 	trackerResponse, err := t.sendTrackerMessage(startedEvent)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("Error communicating with tracker: " + err.Error())
 	}
 
 	if warning, ok := trackerResponse["warning message"]; ok {
@@ -620,10 +620,11 @@ func (t *Torrent) sendTrackerMessage(event trackerEventKinds) (map[string]any, e
 	queryParams := url.Values{}
 	queryParams.Set("peer_id", CLIENT_PEER_ID)
 	queryParams.Set("port", t.portForTrackerResponse)
-	queryParams.Set("uploaded", strconv.Itoa(t.numUploadedBytes))
-	queryParams.Set("downloaded", strconv.Itoa(t.numBytesDownloaded()))
-	queryParams.Set("left", strconv.Itoa(t.totalSize-t.numBytesDownloaded()))
+	queryParams.Set("uploaded", strconv.Itoa(t.NumUploadedBytes))
+	queryParams.Set("downloaded", strconv.Itoa(t.NumBytesDownloaded()))
+	queryParams.Set("left", strconv.Itoa(t.TotalSize-t.NumBytesDownloaded()))
 	queryParams.Set("event", string(event))
+	// TODO: Support non-compact responses
 	queryParams.Set("compact", "1")
 	if t.trackerId != "" {
 		queryParams.Set("trackerid", t.trackerId)
@@ -912,7 +913,7 @@ func newPieceData(pieceSize int) *pieceData {
 
 func (p *pieceData) ActualSize(t *Torrent) int {
 	if p.num == t.numPieces-1 {
-		return t.totalSize - p.num*t.pieceSize
+		return t.TotalSize - p.num*t.pieceSize
 	}
 
 	return t.pieceSize

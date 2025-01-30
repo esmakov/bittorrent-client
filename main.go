@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,19 +28,23 @@ var DefaultAdminListenPort = "2019"
 func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 	fmt.Println("Admin dashboard running on port " + DefaultAdminListenPort)
 
-	tmpl := template.Must(template.ParseFiles("status_page_template.html"))
+	tmpl := template.Must(template.ParseFiles("static/status_page_template.html"))
 
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 
 	http.HandleFunc("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reports := make([]struct {
-			Name     string
-			Bitfield []byte
+			Info          torrent.TorrentMetaInfo
+			Bitfield      []byte
+			NumDownloaded int
+			NumUploaded   int
 		}, len(torrents))
 
 		for i, torr := range torrents {
-			reports[i].Name = torr.MetaInfoFileName
+			reports[i].Info = torr.TorrentMetaInfo
 			reports[i].Bitfield = torr.Bitfield
+			reports[i].NumDownloaded = torr.NumBytesDownloaded()
+			reports[i].NumUploaded = torr.NumUploadedBytes
 		}
 
 		err := tmpl.Execute(w, reports)
@@ -53,13 +58,7 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		if _, err := w.Write([]byte("data: Connected to SSE\n\n")); err != nil {
-			log.Fatal(err)
-		}
-
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
+		sendSSE(w, []byte("Connected to SSE"))
 
 		// TODO: Replace timer with a channel
 		ticker := time.NewTicker(1 * time.Second)
@@ -69,32 +68,35 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 			select {
 			case <-ticker.C:
 				for _, t := range torrents {
-					msg := struct {
-						Torrent string
-						Body    string
-					}{
-						Torrent: t.MetaInfoFileName,
-						Body:    t.Logbuf.String(),
-					}
-
-					if len(msg.Body) == 0 {
+					logs := t.Logbuf.String()
+					if logs == "" {
 						continue
 					}
 
-					bytes, err := json.Marshal(msg)
-					if err != nil {
-						log.Fatalln(err)
-					}
+					// Split concatenated JSON entries
+					entries := strings.Split(logs, "\n")
+					for _, entry := range entries {
+						if entry == "" {
+							continue
+						}
 
-					if _, err := w.Write([]byte(fmt.Sprintf("data: %s\n\n", bytes))); err != nil {
-						log.Fatalln("Error writing to client:", err)
-					}
+						msg := struct {
+							Name string
+							Body string
+						}{
+							Name: t.MetaInfoFileName,
+							Body: entry,
+						}
 
-					if f, ok := w.(http.Flusher); ok {
-						f.Flush()
-					}
+						bytes, err := json.Marshal(msg)
+						if err != nil {
+							log.Fatalln(err)
+						}
 
-					t.Logbuf.Reset()
+						sendSSE(w, bytes)
+
+						t.Logbuf.Reset()
+					}
 				}
 
 			case <-r.Context().Done():
@@ -115,6 +117,17 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 	}))
 
 	log.Fatalln(http.ListenAndServe("127.0.0.1:"+DefaultAdminListenPort, nil))
+}
+
+func sendSSE(w http.ResponseWriter, bytes []byte) {
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", bytes); err != nil {
+		log.Println("SSE write error:", err)
+		return
+	}
+
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // All the info we need to persist to start/resume torrents, and none
@@ -138,7 +151,7 @@ func kickOffTorrents(torrs []*torrent.Torrent) {
 
 		t.SetWantedBitfield()
 
-		fmt.Println("Checking...")
+		t.Logger.Info("Checking...")
 		_, err := t.CheckAllPieces()
 		if err != nil {
 			t.Logger.Error(err.Error())

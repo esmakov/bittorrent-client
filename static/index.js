@@ -2,22 +2,54 @@ const eventSource = new EventSource('/events');
 const sections = document.querySelectorAll("section");
 
 eventSource.onmessage = function(event) {
-    let data;
-    let level, time, msg;
-
-    try {
-        data = JSON.parse(event.data);
-        level, time, msg = JSON.parse(data.Body);
-    } catch (e) {
-        console.error("Parse:", e);
-        console.debug("event.data:", event.data)
-        console.debug("data:", data)
+    if (event.data.trim() == "Connected to SSE") {
+        console.log("Connected to server")
         return
     }
 
-    const e = Array.from(sections).filter(s => s.querySelector("h2").textContent == data.Torrent)[0].querySelector("textarea");
-    e.value += level + time + msg + "\n";
-    e.scrollTop = e.scrollHeight;
+    try {
+        const { Name, Body } = JSON.parse(event.data);
+        const { time, level, msg } = JSON.parse(Body);
+
+        const section = document.querySelector(`[data-name="${Name}"]`);
+        const grid = section.querySelector(".grid-container");
+
+        const timeCol = grid.querySelector(".time")
+        const timeElem = document.createElement("div")
+        timeElem.textContent = time
+        timeCol.appendChild(timeElem)
+
+        const levelCol = grid.querySelector(".level")
+        const levelElem = document.createElement("div")
+        levelElem.textContent = level
+
+        switch (level) {
+            case "ERROR":
+                levelElem.className += "error";
+                break;
+            case "WARN":
+                levelElem.className += "warn";
+                break;
+            case "INFO":
+                levelElem.className += "info";
+                break;
+            case "DEBUG":
+                levelElem.className += "debug";
+                break;
+        }
+        levelCol.appendChild(levelElem)
+
+        const msgCol = grid.querySelector(".msg")
+        const msgElem = document.createElement("div")
+        msgElem.textContent = msg
+        msgCol.appendChild(msgElem)
+
+    } catch (e) {
+        console.error(e);
+        console.debug("event.data:", event.data)
+        return
+    }
+
 };
 
 eventSource.onerror = function() {

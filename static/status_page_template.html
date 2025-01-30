@@ -1,0 +1,64 @@
+<html>
+
+<head lang="en">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Another BitTorrent Client</title>
+
+    <link rel="stylesheet" href="static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@100..700&display=swap" rel="stylesheet">
+    <script src="static/index.js" type="module"></script>
+</head>
+
+<body>
+    <h1>Another BitTorrent Client</h1>
+    <main>
+        {{ if len . }}
+
+        {{range .}}
+        <section data-name={{.Info.MetaInfoFileName}}>
+            <div class="description">
+                <h2>{{ .Info.MetaInfoFileName }}</h2>
+
+                {{ if .Info.IsPrivate }}
+                <p style="color: red;">Private</p>
+                {{ end }}
+
+                <p>Total size: {{ .Info.TotalSize }} bytes </p>
+                <p>Downloaded: {{ .NumDownloaded }} bytes </p>
+                <p>Uploaded: {{ .NumUploaded }} bytes </p>
+            </div>
+
+            <div class="grid-container">
+                <div class="column time"></div>
+                <div class="column level"></div>
+                <div class="column msg"></div>
+            </div>
+
+            <div class="bitfield">
+                {{range .Bitfield}}
+
+                {{if .}}
+                <div class="piece complete">
+                </div>
+
+                {{else}}
+                <div class="piece">
+                </div>
+                {{end}}
+
+                {{end}}
+            </div>
+        </section>
+        {{end}}
+
+        {{else}}
+        <h2>No torrents</h2>
+        {{end}}
+    </main>
+</body>
+
+</html>
