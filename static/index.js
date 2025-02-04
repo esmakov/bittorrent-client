@@ -1,5 +1,4 @@
 const eventSource = new EventSource('/events');
-const sections = document.querySelectorAll("section");
 
 eventSource.onmessage = function(event) {
     if (event.data.trim() == "Connected to SSE") {
@@ -13,16 +12,16 @@ eventSource.onmessage = function(event) {
 
         const section = document.querySelector(`[data-name="${Name}"]`);
         const grid = section.querySelector(".grid-container");
+        const logElem = document.createElement("div")
+        logElem.className = "log"
+        grid.appendChild(logElem)
 
-        const timeCol = grid.querySelector(".time")
         const timeElem = document.createElement("div")
         timeElem.textContent = time
-        timeCol.appendChild(timeElem)
+        logElem.appendChild(timeElem)
 
-        const levelCol = grid.querySelector(".level")
         const levelElem = document.createElement("div")
         levelElem.textContent = level
-
         switch (level) {
             case "ERROR":
                 levelElem.className += "error";
@@ -37,12 +36,11 @@ eventSource.onmessage = function(event) {
                 levelElem.className += "debug";
                 break;
         }
-        levelCol.appendChild(levelElem)
+        logElem.appendChild(levelElem)
 
-        const msgCol = grid.querySelector(".msg")
         const msgElem = document.createElement("div")
         msgElem.textContent = msg
-        msgCol.appendChild(msgElem)
+        logElem.appendChild(msgElem)
 
     } catch (e) {
         console.error(e);

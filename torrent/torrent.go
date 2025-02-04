@@ -50,7 +50,7 @@ type Torrent struct {
 	TorrentMetaInfo
 	TorrentOptions
 
-	NumUploadedBytes       int
+	NumBytesUploaded       int
 	Bitfield               []byte
 	wantedBitfield         []byte
 	Files                  []*TorrentFile
@@ -60,8 +60,8 @@ type Torrent struct {
 
 	// Optionally sent by server
 	trackerId string
-	seeders   int
-	leechers  int
+	Seeders   int
+	Leechers  int
 
 	// TODO: state field (paused, seeding, etc), maybe related to tracker "event"
 
@@ -188,7 +188,9 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 		portForTrackerResponse: ":8080",
 	}
 
-	t.Logger = *slog.New(slog.NewJSONHandler(&t.Logbuf, nil))
+	t.Logger = *slog.New(slog.NewJSONHandler(&t.Logbuf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
 
 	return t, nil
 }
@@ -196,19 +198,19 @@ func New(metaInfoFileName string, shouldPrettyPrint bool) (*Torrent, error) {
 func (t *Torrent) storeSeeders(n int) {
 	t.Lock()
 	defer t.Unlock()
-	t.seeders = n
+	t.Seeders = n
 }
 
 func (t *Torrent) storeLeechers(n int) {
 	t.Lock()
 	defer t.Unlock()
-	t.leechers = n
+	t.Leechers = n
 }
 
-func (t *Torrent) storeUploadedBytes(n int) {
+func (t *Torrent) storeBytesUploaded(n int) {
 	t.Lock()
 	defer t.Unlock()
-	t.NumUploadedBytes = n
+	t.NumBytesUploaded = n
 }
 
 func (t *Torrent) NumBytesDownloaded() int {
@@ -620,7 +622,7 @@ func (t *Torrent) sendTrackerMessage(event trackerEventKinds) (map[string]any, e
 	queryParams := url.Values{}
 	queryParams.Set("peer_id", CLIENT_PEER_ID)
 	queryParams.Set("port", t.portForTrackerResponse)
-	queryParams.Set("uploaded", strconv.Itoa(t.NumUploadedBytes))
+	queryParams.Set("uploaded", strconv.Itoa(t.NumBytesUploaded))
 	queryParams.Set("downloaded", strconv.Itoa(t.NumBytesDownloaded()))
 	queryParams.Set("left", strconv.Itoa(t.TotalSize-t.NumBytesDownloaded()))
 	queryParams.Set("event", string(event))
@@ -1123,7 +1125,7 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 
 	currPieceSize := t.pieceSize
 	if pieceNum == t.numPieces-1 {
-		currPieceSize = t.totalSize - pieceNum*t.pieceSize
+		currPieceSize = t.TotalSize - pieceNum*t.pieceSize
 	}
 
 	p := newPieceData(currPieceSize)
@@ -1137,7 +1139,7 @@ func (t *Torrent) handlePieceRequest(pieceNum int, blockSize int, outboundMsgs c
 		offset += blockSize
 	}
 
-	t.storeUploadedBytes(t.numUploadedBytes + currPieceSize)
+	t.storeBytesUploaded(t.NumBytesUploaded + currPieceSize)
 
 	return nil
 }

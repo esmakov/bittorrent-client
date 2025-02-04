@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -38,13 +37,17 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 			Bitfield      []byte
 			NumDownloaded int
 			NumUploaded   int
+			Seeders       int
+			Leechers      int
 		}, len(torrents))
 
 		for i, torr := range torrents {
 			reports[i].Info = torr.TorrentMetaInfo
 			reports[i].Bitfield = torr.Bitfield
 			reports[i].NumDownloaded = torr.NumBytesDownloaded()
-			reports[i].NumUploaded = torr.NumUploadedBytes
+			reports[i].NumUploaded = torr.NumBytesUploaded
+			reports[i].Seeders = torr.Seeders
+			reports[i].Leechers = torr.Leechers
 		}
 
 		err := tmpl.Execute(w, reports)
@@ -52,6 +55,15 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 			log.Fatalln(err)
 		}
 	}))
+
+	type clientMessage struct {
+		Name string
+		Body string
+	}
+	// We do some double-buffering and store a read offset to
+	// allow for replaying messages
+	var msgLog []clientMessage
+	offset := 0
 
 	http.HandleFunc("/events", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -67,40 +79,35 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 		for {
 			select {
 			case <-ticker.C:
+				for _, msg := range msgLog[offset:] {
+					bytes, err := json.Marshal(msg)
+					if err != nil {
+						log.Fatalln(err)
+					}
+
+					sendSSE(w, bytes)
+					offset += 1
+				}
+
 				for _, t := range torrents {
-					logs := t.Logbuf.String()
-					if logs == "" {
+					logEntry, err := t.Logbuf.ReadString('\n')
+					if errors.Is(err, io.EOF) || logEntry == "" {
 						continue
+					} else if err != nil {
+						log.Fatalln(err)
 					}
 
-					// Split concatenated JSON entries
-					entries := strings.Split(logs, "\n")
-					for _, entry := range entries {
-						if entry == "" {
-							continue
-						}
-
-						msg := struct {
-							Name string
-							Body string
-						}{
+					msgLog = append(msgLog,
+						clientMessage{
 							Name: t.MetaInfoFileName,
-							Body: entry,
-						}
+							Body: logEntry,
+						})
 
-						bytes, err := json.Marshal(msg)
-						if err != nil {
-							log.Fatalln(err)
-						}
-
-						sendSSE(w, bytes)
-
-						t.Logbuf.Reset()
-					}
 				}
 
 			case <-r.Context().Done():
 				fmt.Println("Client disconnected")
+				offset = 0
 				return
 			}
 		}
@@ -157,7 +164,7 @@ func kickOffTorrents(torrs []*torrent.Torrent) {
 			t.Logger.Error(err.Error())
 		}
 
-		fmt.Println(t)
+		t.Logger.Info(t.String())
 
 		peerList, err := t.GetPeersFromTracker()
 		if err != nil {
