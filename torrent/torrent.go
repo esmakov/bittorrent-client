@@ -668,7 +668,7 @@ func (t *Torrent) sendTrackerMessage(event trackerEventKinds) (map[string]any, e
 }
 
 func (t *Torrent) checkPieceHash(p *pieceData) (bool, error) {
-	givenHash, err := hash.HashSHA1(p.data[:p.ActualSize(t)])
+	givenHash, err := hash.HashSHA1(p.data[:ActualSize(t, p.num)])
 	if err != nil {
 		return false, err
 	}
@@ -728,7 +728,7 @@ func (t *Torrent) CheckAllPieces() ([]int, error) {
 
 // Note: Assumes the piece number is initialized
 func (t *Torrent) readPieceFromDisk(p *pieceData) error {
-	currPieceSize := p.ActualSize(t)
+	currPieceSize := ActualSize(t, p.num)
 
 	// All indices are relative to the "stream" of pieces and may cross file boundaries
 	pieceStartByte := int64(p.num * t.pieceSize)
@@ -826,7 +826,7 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 // Note: Assumes the piece number is set correctly and that iterating over
 // t.Files happens in the order that they are defined in the metainfo file.
 func (t *Torrent) writePieceToDisk(p *pieceData) error {
-	currPieceSize := p.ActualSize(t)
+	currPieceSize := ActualSize(t, p.num)
 
 	// All piece indices are relative to the "stream" of pieces and may cross file boundaries
 	pieceStartByte := int64(p.num * t.pieceSize)
@@ -913,9 +913,9 @@ func newPieceData(pieceSize int) *pieceData {
 	return &pieceData{data: data}
 }
 
-func (p *pieceData) ActualSize(t *Torrent) int {
-	if p.num == t.numPieces-1 {
-		return t.TotalSize - p.num*t.pieceSize
+func ActualSize(t *Torrent, num int) int {
+	if num == t.numPieces-1 {
+		return t.TotalSize - num*t.pieceSize
 	}
 
 	return t.pieceSize
@@ -928,7 +928,7 @@ func (p *pieceData) storeBlockIntoPiece(msg messages.PeerMessage, blockSize int)
 }
 
 func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
-	currPieceSize := p.ActualSize(t)
+	currPieceSize := ActualSize(t, p.num)
 	numBlocks := int(math.Ceil(float64(currPieceSize) / float64(blockSize)))
 	blockOffset := 0
 	// lastBlockOffset := (numBlocks - 1) * BLOCK_SIZE
@@ -1029,7 +1029,7 @@ func (t *Torrent) chooseResponse(peerAddr string, outboundMsgs chan<- []byte, pa
 				p.storeBlockIntoPiece(msg, currBlockSize)
 				blockOffset += CLIENT_BLOCK_SIZE
 
-				currPieceSize = p.ActualSize(t)
+				currPieceSize = ActualSize(t, p.num)
 
 				if blockOffset == currPieceSize {
 					t.Logger.Debug(fmt.Sprintf("CHECKING piece %v", p.num))

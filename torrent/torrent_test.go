@@ -1,9 +1,10 @@
 package torrent
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log"
-	"math/rand"
+	mrand "math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +19,6 @@ const SMALLEST_TYPICAL_PIECE_SIZE = 32 * 1024
 /*
 Creates numFiles of fileSize bytes (all set to Wanted=true) in a new directory
 and generates a metainfo file from them, thereby returning a completed Torrent.
-The file descriptors are uninitialized until calling the OpenOrCreateFiles method.
 
 The file contents are initialized to 1 at the byte level to distinguish them from empty files.
 (i.e. we don't get correct=true when checking a piece that hasn't been completed)
@@ -40,9 +40,9 @@ func createTorrentWithTestData(numFiles, fileSize int) (*Torrent, error) {
 		}
 
 		b := make([]byte, fileSize)
-
-		for i := range len(b) {
-			b[i] = 1
+		_, err = rand.Read(b)
+		if err != nil {
+			return new(Torrent), err
 		}
 
 		_, err = file.Write(b)
@@ -62,7 +62,6 @@ func createTorrentWithTestData(numFiles, fileSize int) (*Torrent, error) {
 	}
 
 	metaInfoFileName := filepath.Base(testDir) + ".torrent"
-
 	torr, err := New(metaInfoFileName, false)
 	if err != nil {
 		return new(Torrent), err
@@ -75,6 +74,12 @@ func createTorrentWithTestData(numFiles, fileSize int) (*Torrent, error) {
 	if torr.numPieces <= 0 {
 		return createTorrentWithTestData(1, 64*1024)
 	}
+
+	_, err = torr.CreateFiles()
+	if err != nil {
+		return nil, err
+	}
+
 	return torr, nil
 }
 
@@ -129,17 +134,12 @@ func TestPopCount(t *testing.T) {
 func TestCheckAllPieces(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		10,
-		rand.Intn(32*1024))
+		mrand.Intn(32*1024))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	filesToCheck, err := torr.OpenOrCreateFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = torr.CheckAllPieces(filesToCheck)
+	_, err = torr.CheckAllPieces()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,32 +162,25 @@ func TestCheckAllPieces(t *testing.T) {
 	}
 }
 
-func TestSavePieceToDisk(t *testing.T) {
+func TestWritePieceToDisk(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		5,
-		rand.Intn(32*1024))
+		mrand.Intn(32*1024))
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	pieceNum := mrand.Intn(torr.numPieces)
+	p := newPieceData(ActualSize(torr, pieceNum))
+	p.num = pieceNum
+	// Needs to have the same contents the files were generated with
+	err = torr.readPieceFromDisk(p)
 
 	if err := os.RemoveAll(torr.dir); err != nil {
 		t.Fatal(err)
 	}
 
-	pieceNum := rand.Intn(torr.numPieces)
-	currPieceSize := torr.pieceSize
-	if pieceNum == torr.numPieces-1 {
-		currPieceSize = torr.totalSize - pieceNum*torr.pieceSize
-	}
-	p := newPieceData(currPieceSize)
-	p.num = pieceNum
-
-	// Needs to have the same contents the files were generated with
-	for i := range len(p.data) {
-		p.data[i] = 1
-	}
-
-	filesToCheck, err := torr.OpenOrCreateFiles()
+	_, err = torr.CreateFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +189,7 @@ func TestSavePieceToDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	existingPieces, err := torr.CheckAllPieces(filesToCheck)
+	existingPieces, err := torr.CheckAllPieces()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,25 +207,16 @@ func TestSavePieceToDisk(t *testing.T) {
 	}
 }
 
-func TestGetPieceFromDisk(t *testing.T) {
+func TestReadPieceFromDisk(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		3,
-		rand.Intn(32*1024))
+		mrand.Intn(32*1024))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = torr.OpenOrCreateFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	pieceNum := rand.Intn(torr.numPieces)
-	currPieceSize := torr.pieceSize
-	if pieceNum == torr.numPieces-1 {
-		currPieceSize = torr.totalSize - pieceNum*torr.pieceSize
-	}
-	p := newPieceData(currPieceSize)
+	pieceNum := mrand.Intn(torr.numPieces)
+	p := newPieceData(ActualSize(torr, pieceNum))
 	p.num = pieceNum
 
 	err = torr.readPieceFromDisk(p)
@@ -261,22 +245,13 @@ func TestGetPieceFromDisk(t *testing.T) {
 func TestSplitIntoBlocks(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		3,
-		rand.Intn(32*1024))
+		mrand.Intn(32*1024))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = torr.OpenOrCreateFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	pieceNum := rand.Intn(torr.numPieces)
-	currPieceSize := torr.pieceSize
-	if pieceNum == torr.numPieces-1 {
-		currPieceSize = torr.totalSize - pieceNum*torr.pieceSize
-	}
-	p := newPieceData(currPieceSize)
+	pieceNum := mrand.Intn(torr.numPieces)
+	p := newPieceData(ActualSize(torr, pieceNum))
 	p.num = pieceNum
 
 	err = torr.readPieceFromDisk(p)
@@ -307,7 +282,7 @@ func TestSplitIntoBlocks(t *testing.T) {
 func TestSelectNextPiece(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		3,
-		rand.Intn(32*1024))
+		mrand.Intn(32*1024))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +290,7 @@ func TestSelectNextPiece(t *testing.T) {
 	torr.SetWantedBitfield()
 
 	p := newPieceData(torr.pieceSize)
-	p.num = rand.Intn(torr.numPieces)
+	p.num = mrand.Intn(torr.numPieces)
 
 	expected := p.num + 1
 	if p.num == torr.numPieces-1 {
@@ -347,16 +322,12 @@ func TestSelectNextPiece(t *testing.T) {
 	}
 }
 
-// Pieces must be downloaded if even a single byte belongs to a file the user wants, even if the rest of the piece is in an unwanted file.
+// Pieces must be downloaded if even a single byte belongs to a file the user wants,
+// even if the rest of the piece is in an unwanted file.
 func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 	torr, err := createTorrentWithTestData(
 		3,
 		SMALLEST_TYPICAL_PIECE_SIZE)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = torr.OpenOrCreateFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,8 +341,8 @@ func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 	expected := []bool{true, false, true}
 
 	actual := torr.getWantedPieces()
-	for i, bool := range actual {
-		if expected[i] != bool {
+	for i, result := range actual {
+		if expected[i] != result {
 			t.Fatalf("Expected to want pieces %v, actually wanted pieces %v\n", expected, actual)
 		}
 	}
@@ -387,23 +358,14 @@ func TestGetWantedPieceNumsNoBoundaryCrossed(t *testing.T) {
 
 func TestGetWantedPieceNumsBoundaryCrossed(t *testing.T) {
 	torr, err := createTorrentWithTestData(
-		2,
-		SMALLEST_TYPICAL_PIECE_SIZE/2)
+		3,
+		SMALLEST_TYPICAL_PIECE_SIZE/3)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if torr.numPieces != 1 {
-		t.Fatalf("Expected there to be 1 piece, actual: %v\n", torr.numPieces)
-	}
-
-	_, err = torr.OpenOrCreateFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	torr.Files[1].Wanted = false
-	expected := []bool{true}
+	torr.Files[0].Wanted = false
+	expected := []bool{true} // Only one piece so we definitely want it
 
 	actual := torr.getWantedPieces()
 	for i, bool := range actual {
