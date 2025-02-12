@@ -201,54 +201,22 @@ func main() {
 			}
 		}
 
-		cf, err := openConfigFile()
+		records, err := openConfigRecords()
 		if err != nil {
 			log.Fatalln(err)
 		}
 
-		configBytes, err := io.ReadAll(cf)
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		if len(configBytes) == 0 {
-			// Initialize with top level array
-			_, err := cf.WriteString("[]")
-			if err != nil {
-				log.Fatalln(err)
-			}
-
-			// Move the file cursor back
-			_, err = cf.Seek(0, io.SeekStart)
-			if err != nil {
-				log.Fatalln(err)
-			}
-
-		}
-
-		var records []TorrentRecord
-		err = json.Unmarshal(configBytes, &records)
-		if err != nil {
-			log.Fatalln(err)
-		}
 
 		wg := sync.WaitGroup{}
 		wg.Add(1)
 
 		var torrs []*torrent.Torrent
 		for _, rec := range records {
-			t, err := torrent.New(rec.MetaInfoFileName, false)
+			t, err := torrentFromRecord(rec)
 			if err != nil {
 				log.Fatalln(err)
 			}
 
-			for k := range rec.WantedFiles {
-				if _, ok := rec.WantedFiles[k]; ok {
-					t.Files[k].Wanted = true
-				}
-			}
-
-			t.UserDesiredConns = rec.UserDesiredConns
 
 			torrs = append(torrs, t)
 		}
@@ -383,25 +351,6 @@ func main() {
 		cf, err := openConfigFile()
 		if err != nil {
 			log.Fatalln(err)
-		}
-
-		info, err := cf.Stat()
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		if info.Size() == int64(0) {
-			// Initialize with top level array
-			_, err := cf.WriteString("[]")
-			if err != nil {
-				log.Fatalln(err)
-			}
-
-			// Move the file cursor back
-			_, err = cf.Seek(0, io.SeekStart)
-			if err != nil {
-				log.Fatalln(err)
-			}
 		}
 
 		configBytes, err := io.ReadAll(cf)
@@ -575,17 +524,71 @@ func main() {
 }
 
 func openConfigFile() (*os.File, error) {
-	homeDir, err := os.UserHomeDir()
+	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return nil, err
 	}
 
-	configFile, err := os.OpenFile(filepath.Join(homeDir, ".config", "abc.json"), os.O_CREATE|os.O_RDWR, 0o644)
+	cf, err := os.OpenFile(filepath.Join(configDir, "abc.json"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
 	}
 
-	return configFile, nil
+	info, err := cf.Stat()
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	if info.Size() == int64(0) {
+		// Initialize with top level array
+		_, err := cf.WriteString("[]")
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		// Move the file cursor back for future reads
+		_, err = cf.Seek(0, io.SeekStart)
+		if err != nil {
+			log.Fatalln(err)
+		}
+	}
+
+	return cf, nil
+}
+
+func openConfigRecords() ([]TorrentRecord, error) {
+	cf, err := openConfigFile()
+	if err != nil {
+		return nil, err
+	}
+
+	configBytes, err := io.ReadAll(cf)
+	if err != nil {
+		return nil, err
+	}
+
+	var records []TorrentRecord
+	err = json.Unmarshal(configBytes, &records)
+	if err != nil {
+		return nil, err
+	}
+
+	return records, nil
+}
+
+func torrentFromRecord(rec TorrentRecord) (*torrent.Torrent, error) {
+	torr, err := torrent.New(rec.MetaInfoFileName, false)
+	if err != nil {
+		return new(torrent.Torrent), err
+	}
+
+	for k := range rec.WantedFiles {
+		torr.Files[k].Wanted = true
+	}
+
+	torr.UserDesiredConns = rec.UserDesiredConns
+
+	return torr, nil
 }
 
 type model struct {
