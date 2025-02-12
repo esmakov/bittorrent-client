@@ -35,7 +35,7 @@ type TorrentMetaInfo struct {
 	comment          string
 	infoHash         []byte
 	IsPrivate        bool
-	piecesStr        string
+	piecesStr        string // Concatenation of all piece hashes, used for verification
 	TotalSize        int
 	pieceSize        int // Size of all but the last piece
 	numPieces        int
@@ -316,7 +316,8 @@ func (t *Torrent) String() string {
 	return sb.String()
 }
 
-// Returns a bool slice of wanted pieces, based on which files the user wants. The slice index corresponds to the 0-indexed piece numbers.
+// Returns a bool slice of wanted pieces, based on which files the user wants.
+// The returned slice index corresponds to the 0-indexed piece numbers.
 func (t *Torrent) getWantedPieces() []bool {
 	wantedPieces := make([]bool, t.numPieces)
 
@@ -324,13 +325,16 @@ func (t *Torrent) getWantedPieces() []bool {
 	for _, file := range t.Files {
 		fileEndIdx += file.finalSize
 
+		// Pieces that spill over into unwanted files will still be marked
+		// as wanted by adjacent files that are wanted, so we can do this
 		if !file.Wanted {
 			continue
 		}
+
 		/*
-			                     filePtr=85            filePtr = 140
-			NNNNNNNNNNNNNNNNNNNNNN|YYYYYYYYYYYYYYYYYYYY|NNNNNNNNNNNNNNNNNN
-			unwanted piece  | piece 3 | piece 4 | piece 5 |
+			unwanted file         fileStartByte=85      fileStartByte = 140
+			NNNNNNNNNNNNNNNNNNNNNN|YYYYYYYYYYYYYYYYYYYY|NNNNNNNNNNNNNNNNNNN
+			unwanted piece  | piece 2 | piece 3 | piece 4 |
 			                75        100       125
 		*/
 
@@ -341,9 +345,6 @@ func (t *Torrent) getWantedPieces() []bool {
 
 		lastWantedPieceIdx := ((fileEndIdx - 1) / int64(t.pieceSize)) * int64(t.pieceSize)
 		lastWantedPieceNum := lastWantedPieceIdx / int64(t.pieceSize)
-		// if lastWantedPieceNum == int64(t.numPieces) {
-		// 	lastWantedPieceNum = int64(t.numPieces) - 1
-		// }
 
 		for num := firstWantedPieceNum; num <= lastWantedPieceNum; num++ {
 			wantedPieces[num] = true
@@ -598,14 +599,14 @@ func (t *Torrent) acceptConns(ctx context.Context, maxPeers int, errs chan error
 				t.Unlock()
 				continue
 			} else if err != nil {
-				log.Println("Accept:", err)
+				t.Logger.Error("Accept: " + err.Error())
 				t.Unlock()
 				continue
 			}
 
-			t.Logger.Debug("Incoming conn from" + conn.RemoteAddr().String())
-			t.activeConns[conn.RemoteAddr().String()] = conn
+			t.Logger.Debug("Incoming conn from " + conn.RemoteAddr().String())
 
+			t.activeConns[conn.RemoteAddr().String()] = conn
 			// New context for same reason as in StartConns
 			newCtx, newCancel := context.WithCancel(ctx)
 			go t.handleConn(newCtx, newCancel, conn, errs)
@@ -684,7 +685,8 @@ var (
 /*
 Reads and verifies existing data on disk when the user adds a torrent.
 
-Also checks the number of pieces downloaded so far, which is used to determine if the torrent is complete.
+Also sets the number of pieces downloaded so far, which is used for reporting to the
+tracker and to determine if the torrent is complete.
 
 TODO: Benchmark a multithreaded version
 */
@@ -716,6 +718,8 @@ func (t *Torrent) CheckAllPieces() ([]int, error) {
 		}
 
 		// NOTE: Piece could be empty and still correct at this point, if intentionally so
+
+		// No worries about lock contention since this function runs before we start looking for peers
 		t.safeSetBitfield(p.num)
 
 		existingPieces = append(existingPieces, p.num)
@@ -741,7 +745,7 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 		}
 
 		if pieceStartByte >= fileInfo.Size() {
-			return ErrPieceNotOnDisk
+			return ErrPieceNotProgressedTo
 		}
 		_, err = t.Files[0].fd.ReadAt(p.data[:currPieceSize], pieceStartByte)
 		return err
@@ -773,7 +777,7 @@ func (t *Torrent) readPieceFromDisk(p *pieceData) error {
 			if fileInfo.Size() < currFile.finalSize {
 				if pieceOffsetIntoFile >= fileInfo.Size() {
 					// We don't have this piece yet
-					return ErrPieceNotOnDisk
+					return ErrPieceNotProgressedTo
 				}
 			}
 
@@ -946,15 +950,15 @@ func (p *pieceData) splitIntoBlocks(t *Torrent, blockSize int) [][]byte {
 	currPieceSize := ActualSize(t, p.num)
 	numBlocks := int(math.Ceil(float64(currPieceSize) / float64(blockSize)))
 	blockOffset := 0
-	// lastBlockOffset := (numBlocks - 1) * BLOCK_SIZE
-
 	blocks := make([][]byte, numBlocks)
+
 	for i := 0; i < numBlocks; i++ {
 		remainingPieceSize := currPieceSize - i*blockSize
 		readSize := min(blockSize, remainingPieceSize)
 		blocks[i] = p.data[blockOffset : blockOffset+readSize]
 		blockOffset += blockSize
 	}
+
 	return blocks
 }
 
