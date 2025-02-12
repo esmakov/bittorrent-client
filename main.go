@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,7 +23,7 @@ import (
 
 var DefaultAdminListenPort = "2019"
 
-func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
+func listenAdminEndpoint(done chan struct{}, torrents []*torrent.Torrent) {
 	fmt.Println("Admin dashboard running on port " + DefaultAdminListenPort)
 
 	tmpl := template.Must(template.ParseFiles("static/status_page_template.html"))
@@ -72,7 +71,6 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 
 		sendSSE(w, []byte("Connected to SSE"))
 
-		// TODO: Replace timer with a channel
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
@@ -120,7 +118,7 @@ func listenAdminEndpoint(wg *sync.WaitGroup, torrents []*torrent.Torrent) {
 		}
 
 		// die valiantly
-		wg.Done()
+		done <- struct{}{}
 	}))
 
 	log.Fatalln(http.ListenAndServe("127.0.0.1:"+DefaultAdminListenPort, nil))
@@ -206,10 +204,6 @@ func main() {
 			log.Fatalln(err)
 		}
 
-
-		wg := sync.WaitGroup{}
-		wg.Add(1)
-
 		var torrs []*torrent.Torrent
 		for _, rec := range records {
 			t, err := torrentFromRecord(rec)
@@ -217,16 +211,16 @@ func main() {
 				log.Fatalln(err)
 			}
 
-
 			torrs = append(torrs, t)
 		}
 
-		go listenAdminEndpoint(&wg, torrs)
+		done := make(chan struct{})
+		go listenAdminEndpoint(done, torrs)
 
 		go kickOffTorrents(torrs)
 
 		// Keep the process going until the API's stop handler is triggered
-		wg.Wait()
+		<-done
 
 	case "start":
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
