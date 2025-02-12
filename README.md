@@ -9,13 +9,15 @@ go install .
 
 ## Usage
 ```console
-bittorrent-client <run>|<start>|<stop> [<add>|<info>|<parse> <path/to/file.torrent>]
+bittorrent-client <run>|<start>|<stop>|<remove>|<repair> [<add>|<info>|<parse> <path/to/file.torrent>]
 ```
 
 - The following commands are supported:
   - run: Run client in the foreground
-  - start: Run in the background. 
+  - start: Run in the background 
   - stop: Stop working in the background
+  - remove: Remove a torrent from the client
+  - repair: Remove corrupted pieces of data
   - add: Add a new torrent and select the files you want
   - info: Display information about the torrent (total size, # of files, etc.)
   - parse: Display the .torrent file parse tree
@@ -35,8 +37,13 @@ bittorrent-client <run>|<start>|<stop> [<add>|<info>|<parse> <path/to/file.torre
 ## TODOs
 - Test more than one torrent at a time
 - Send keepalives
+- Remove multiple torrents at once
 - Blacklist misbehaving peers
-- User-customized paths for downloads, config file
+- Stream bitfield changes to client
+- Persist number of bytes uploaded
+- Colored output for parse subcommand
+- Add and remove torrents without restarting
+- User-specified logging level, paths for downloads, path for config file
 - Use already-written bencode package to generate .torrent files (instead of pobrn/mktorrent)
 
 ### Optimizations
