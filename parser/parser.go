@@ -28,7 +28,9 @@ const (
 	btDictEnd
 )
 
-var ErrInvalidToken = errors.New("Invalid token type")
+const PRINT_CUTOFF = 256
+
+var ErrInvalidToken = errors.New("Invalid token")
 
 func (t btTokenKinds) String() string {
 	switch t {
@@ -76,7 +78,6 @@ func New(shouldPrettyPrint bool) parser {
 	}
 }
 
-// NOTE: Assumes that the provided file is correctly encoded
 func (p *parser) ParseMetaInfoFile(fileBytes []byte) (topLevelMap map[string]any, infoHash []byte, e error) {
 	if e = p.bDecode(fileBytes); e != nil {
 		return
@@ -85,10 +86,6 @@ func (p *parser) ParseMetaInfoFile(fileBytes []byte) (topLevelMap map[string]any
 	// Extract "info dict" substring
 	if p.infoDictStartIdx == 0 || p.infoDictEndIdx == 0 {
 		e = errors.New("Didn't find info dict start or end")
-		return
-	}
-	if p.infoDictEndIdx > len(fileBytes) {
-		e = errors.New("Tried to take a substring out of range of the file")
 		return
 	}
 
@@ -112,7 +109,7 @@ func (p *parser) ParseTrackerResponse(bytes []byte) (map[string]any, error) {
 		return nil, err
 	}
 
-	// Ignore start of dict
+	// Ignore dict start marker
 	if _, err := p.consumeToken(); err != nil {
 		return nil, err
 	}
@@ -137,7 +134,7 @@ func (p *parser) parse(t btToken) any {
 
 func (p *parser) consumeToken() (btToken, error) {
 	if len(p.tokenList) == 0 {
-		return *new(btToken), errors.New("End of list")
+		return *new(btToken), errors.New("End of tokens")
 	}
 
 	t := p.tokenList[0]
@@ -195,15 +192,16 @@ func (p parser) prettyPrint(t btToken) {
 		return
 	}
 
-	if len(t.lexeme) > 200 {
-		fmt.Printf("%v %v %q\n", strings.Repeat("\t", p.indentLevel), t.tokenKind, t.lexeme[:200]+"...")
+	if len(t.lexeme) > PRINT_CUTOFF {
+		fmt.Printf("%v %v %q\n", strings.Repeat("\t", p.indentLevel), t.tokenKind, t.lexeme[:PRINT_CUTOFF]+"...")
 	} else {
 		fmt.Printf("%v %v %q\n", strings.Repeat("\t", p.indentLevel), t.tokenKind, t.lexeme)
 	}
 }
 
 // Parses a bencoded sequence of bytes.
-// As a side effect, bDecode also builds up the token list and populates indices around  the "info" dictionary, so it can be extracted from the file in a later pass.
+// As a side effect, bDecode also builds up the token list and populates indices
+// around the "info" dictionary, so it can be extracted from the file in a later pass.
 func (p *parser) bDecode(data []byte) error {
 	for len(data) > 0 {
 		switch c := data[0]; c {
@@ -296,7 +294,11 @@ func (p *parser) bDecode(data []byte) error {
 		default:
 			// Bencoded string of the form '3:cat'
 			if !(c >= '0' && c <= '9') {
-				return ErrInvalidToken
+				if len(data) > PRINT_CUTOFF {
+					return fmt.Errorf("%v: %s", ErrInvalidToken, data[:PRINT_CUTOFF])
+				} else {
+					return fmt.Errorf("%v: %s", ErrInvalidToken, data)
+				}
 			}
 
 			idxOfColon := bytes.IndexByte(data, ':')
