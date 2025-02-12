@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -315,7 +316,7 @@ func main() {
 
 		t, err := torrent.New(metaInfoFileName, false)
 		if err != nil {
-			panic(err)
+			log.Fatalln(err)
 		}
 
 		var choices []string
@@ -323,7 +324,7 @@ func main() {
 			choices = append(choices, f.Path)
 		}
 
-		m := initialModel(choices)
+		m := multiSelectModel(choices, "Choose files to download.\nPress A to toggle all/none.\n\n")
 		p := tea.NewProgram(m)
 		if _, err := p.Run(); err != nil {
 			fmt.Printf("BubbleTea error: %v", err)
@@ -335,11 +336,8 @@ func main() {
 			UserDesiredConns: *userDesiredConns,
 			WantedFiles:      make(map[int]struct{}),
 		}
-
 		for k := range m.selected {
-			if _, ok := m.selected[k]; ok {
-				rec.WantedFiles[k] = struct{}{}
-			}
+			rec.WantedFiles[k] = struct{}{}
 		}
 
 		cf, err := openConfigFile()
@@ -357,67 +355,45 @@ func main() {
 			log.Fatalln("unmarshal:", err)
 		}
 
-		// Filter out existing record for this torrent
-		q, err := gojq.Parse(".[] | select(.MetaInfoFileName != $s)")
+		// Avoid creating duplicate entries
+		remainingRecs, err := filterFromRecords(metaInfoFileName, oldRecs)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		remainingRecs = append(remainingRecs, rec)
+
+		b, err := json.Marshal(remainingRecs)
 		if err != nil {
 			log.Fatalln(err)
 		}
 
-		code, err := gojq.Compile(q, gojq.WithVariables([]string{"$s"}))
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		var newRecs []any
-		iter := code.Run(oldRecs, rec.MetaInfoFileName)
-		for {
-			v, ok := iter.Next()
-			if !ok {
-				break
-			}
-			if err, ok := v.(error); ok {
-				if err, ok := err.(*gojq.HaltError); ok && err.Value() == nil {
-					break
-				}
-				log.Fatalln(err)
-			}
-
-			newRecs = append(newRecs, v)
-		}
-
-		newRecs = append(newRecs, rec)
-
-		b, err := json.Marshal(newRecs)
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		// Overwrite existing contents
-		if err = cf.Truncate(0); err != nil {
-			log.Fatalln(err)
-		}
-
-		_, err = cf.Seek(0, io.SeekStart)
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		_, err = cf.Write(b)
-		if err != nil {
+		if err := overwriteConfig(b); err != nil {
 			log.Fatalln(err)
 		}
 
 		// signal client to refresh?
 
 	case "remove":
-		if len(os.Args) < 3 {
-			log.Fatalln("Not enough arguments")
+		records, err := openConfigRecords()
+		if err != nil {
+			log.Fatalln(err)
 		}
 
-		metaInfoFileName := os.Args[2]
-		if filepath.Ext(metaInfoFileName) != ".torrent" {
-			fmt.Println(metaInfoFileName, "is not a .torrent file.")
+		var choices []string
+		for _, rec := range records {
+			choices = append(choices, rec.MetaInfoFileName)
+		}
+		m := multiSelectModel(choices, "Select a torrent to remove from the client. Its data will not be deleted.\n")
+		p := tea.NewProgram(m)
+		if _, err := p.Run(); err != nil {
+			fmt.Printf("BubbleTea error: %v", err)
 			os.Exit(1)
+		}
+
+		var chosen int
+		for k := range m.selected {
+			chosen = k
+			break
 		}
 
 		cf, err := openConfigFile()
@@ -435,55 +411,89 @@ func main() {
 			log.Fatalln("Unmarshal:", err)
 		}
 
-		// Filter out existing record for this torrent
-		q, err := gojq.Parse(".[] | select(.MetaInfoFileName != $s)")
+		remainingRecs, err := filterFromRecords(choices[chosen], oldRecs)
 		if err != nil {
 			log.Fatalln(err)
 		}
 
-		code, err := gojq.Compile(q, gojq.WithVariables([]string{"$s"}))
+		b, err := json.Marshal(remainingRecs)
 		if err != nil {
 			log.Fatalln(err)
 		}
 
-		var newRecs []any
-		iter := code.Run(oldRecs, metaInfoFileName)
-		for {
-			v, ok := iter.Next()
-			if !ok {
-				break
-			}
-			if err, ok := v.(error); ok {
-				if err, ok := err.(*gojq.HaltError); ok && err.Value() == nil {
-					break
-				}
-				log.Fatalln(err)
-			}
-
-			newRecs = append(newRecs, v)
-		}
-
-		b, err := json.Marshal(newRecs)
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		// Overwrite existing contents
-		if err = cf.Truncate(0); err != nil {
-			log.Fatalln(err)
-		}
-
-		_, err = cf.Seek(0, io.SeekStart)
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		_, err = cf.Write(b)
-		if err != nil {
+		if err := overwriteConfig(b); err != nil {
 			log.Fatalln(err)
 		}
 
 		// signal client to refresh?
+	case "repair":
+		records, err := openConfigRecords()
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		if len(records) == 0 {
+			fmt.Println("No torrents found, add at least one to attempt repairs.")
+			os.Exit(1)
+		}
+
+		var choices []string
+		for _, rec := range records {
+			choices = append(choices, rec.MetaInfoFileName)
+		}
+		m := multiSelectModel(choices, "Choose a torrent to repair.\n")
+		p := tea.NewProgram(m)
+		if _, err := p.Run(); err != nil {
+			fmt.Printf("BubbleTea error: %v", err)
+			os.Exit(1)
+		}
+
+		chosen := -1
+		for k := range m.selected {
+			chosen = k
+			break
+		}
+		if chosen == -1 {
+			fmt.Println("You must choose a torrent to repair.")
+			os.Exit(1)
+		}
+
+		torr, err := torrentFromRecord(records[chosen])
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		_, err = torr.CreateFiles()
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		_, err = torr.CheckAllPieces()
+		for err != nil {
+			fmt.Printf("%v, attempting to remove...\n", err)
+
+			if multiErr, ok := err.(interface{ Unwrap() []error }); ok {
+				badPieceNum := multiErr.Unwrap()[0]
+
+				n, err := strconv.Atoi(badPieceNum.Error())
+				if err != nil {
+					log.Fatalln("Failed to parse bad piece num: %w", err)
+				}
+
+				err = torr.DeletePiece(n)
+				if err != nil {
+					log.Fatalln("Failed to remove piece: %w", err)
+				}
+
+				fmt.Printf("Corrupt piece %v removed successfully\n", badPieceNum)
+			}
+
+			// Check for more
+			_, err = torr.CheckAllPieces()
+		}
+
+		fmt.Printf("%v passed hash check\n", torr.MetaInfoFileName)
+		// if an error is returned aside from ErrPieceNotOnDisk, delete it
 
 	case "info":
 		// TODO: Should show running status of any active torrent, not just default-initialized state
@@ -570,6 +580,25 @@ func openConfigRecords() ([]TorrentRecord, error) {
 	return records, nil
 }
 
+func overwriteConfig(b []byte) error {
+	cf, err := openConfigFile()
+	if err != nil {
+		return err
+	}
+
+	if err = cf.Truncate(0); err != nil {
+		return err
+	}
+
+	_, err = cf.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
+
+	_, err = cf.Write(b)
+	return err
+}
+
 func torrentFromRecord(rec TorrentRecord) (*torrent.Torrent, error) {
 	torr, err := torrent.New(rec.MetaInfoFileName, false)
 	if err != nil {
@@ -585,16 +614,50 @@ func torrentFromRecord(rec TorrentRecord) (*torrent.Torrent, error) {
 	return torr, nil
 }
 
+// gojq will not work with a []TorrentRecord, must be []any
+func filterFromRecords(metaInfoFileName string, records []any) ([]any, error) {
+	q, err := gojq.Parse(".[] | select(.MetaInfoFileName != $s)")
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	code, err := gojq.Compile(q, gojq.WithVariables([]string{"$s"}))
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	var remainingRecs []any
+	iter := code.Run(records, metaInfoFileName)
+	for {
+		v, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if err, ok := v.(error); ok {
+			if err, ok := err.(*gojq.HaltError); ok && err.Value() == nil {
+				break
+			}
+			log.Fatalln(err)
+		}
+
+		remainingRecs = append(remainingRecs, v)
+	}
+
+	return remainingRecs, nil
+}
+
 type model struct {
 	choices     []string
+	prompt      string
 	cursor      int
 	selected    map[int]struct{}
 	selectedAll bool
 }
 
-func initialModel(choices []string) model {
+func multiSelectModel(choices []string, prompt string) model {
 	return model{
 		choices:  choices,
+		prompt:   prompt,
 		selected: make(map[int]struct{}),
 	}
 }
@@ -630,6 +693,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.selected[m.cursor] = struct{}{}
 			}
+
 		case "A", "a":
 			if m.selectedAll {
 				for choice := range m.choices {
@@ -654,8 +718,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	s := "What files do you want to download?\nPress A to toggle all/none.\n\n"
-
+	s := m.prompt
 	for i, choice := range m.choices {
 		cursor := " "
 		if m.cursor == i {

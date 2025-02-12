@@ -898,7 +898,22 @@ func (t *Torrent) writePieceToDisk(p *pieceData) error {
 	return nil
 }
 
-// NOTE: Assumes there is at least one peer returned from the tracker.
+// Writes an uninitialized piece with data zeroed out to effectively delete a corrupted piece
+func (t *Torrent) DeletePiece(num int) error {
+	// Don't need to account for size of last piece because
+	// WritePieceToDisk will call ActualSize
+	p := newPieceData(t.pieceSize)
+	p.num = num
+	err := t.writePieceToDisk(p)
+	if err != nil {
+		return err
+	}
+
+	clearBitfield(t.Bitfield, num)
+	return nil
+}
+
+// WARN: Will panic if tracker returns 0 peers.
 func getRandPeer(peerList []string) string {
 	return peerList[rand.Intn(len(peerList))]
 }
