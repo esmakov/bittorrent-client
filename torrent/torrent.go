@@ -709,7 +709,7 @@ func (t *Torrent) CheckAllPieces() ([]int, error) {
 
 		if !correct {
 			if !empty {
-				return existingPieces, ErrBadPieceHash
+				return existingPieces, fmt.Errorf("Piece %w %w", errors.New(fmt.Sprint(p.num)), ErrBadPieceHash)
 			}
 			// Piece hasn't been downloaded but some pieces ahead have
 			continue
