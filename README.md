@@ -4,7 +4,7 @@ The [mktorrent](github.com/pobrn/mktorrent/) package is required to build test c
 
 ## Installation
 ```console
-go install .
+go install github.com/esmakov/bittorrent-client@latest
 ```
 
 ## Usage
@@ -23,12 +23,11 @@ bittorrent-client <run>|<start>|<stop>|<remove>|<repair> [<add>|<info>|<parse> <
   - parse: Display the .torrent file parse tree
 
 ## Features
-- Parses Bencoded .torrent files and tracker responses
-- Supports Bencoding structured data for serialization
-- Parses and implements the [peer message protocol](https://wiki.theory.org/BitTorrentSpecification#Messages)
-- Downloads single or multi-file torrents
+- Downloads single and multi-file torrents
 - Checks existing data on disk and picks up from where you left off
 - Web UI displays logs and progress
+- Does not save pieces that fail hash check (unlike other clients)
+- Removes any corrupted pieces (such as those left by other clients) with ```remove```
 
 ### Supported BEPs (BitTorrent Enhancement Proposals)
 - 3: Basic BitTorrent protocol (in progress)
@@ -51,7 +50,7 @@ bittorrent-client <run>|<start>|<stop>|<remove>|<repair> [<add>|<info>|<parse> <
 - Better peer selection strategies (optimistic unchoking)
 
 ### Protocol
-- Support the dictionary model for tracker responses listing available peers
+- Support the dictionary model for tracker responses listing available peers (uncommon)
 #### Extensions
 - DHT
 - Peer Exchange
